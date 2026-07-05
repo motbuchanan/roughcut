@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.3 &middot; Jul 5</button>
+      <button id="badge" class="badge" title="Tap for version">v0.4 &middot; Jul 5</button>
     </header>
 
     <main>
@@ -40,12 +40,26 @@
 
         <div class="stage">
           <canvas id="preview" width="405" height="720"></canvas>
-          <div id="preview-hint">Import clips below, then tap one to preview and scrub.</div>
+          <div id="preview-hint">Import clips below, then tap them to add to the timeline.</div>
         </div>
 
-        <div class="scrub-wrap" id="scrub-wrap" style="display:none">
-          <div class="scrub-time" id="scrub-time">0:00.0 / 0:00.0</div>
-          <input type="range" id="scrub" min="0" max="1" step="0.01" value="0" />
+        <div class="timeline" id="timeline">
+          <div class="tl-toolbar">
+            <button id="tl-undo" class="tlbtn" aria-label="Undo">&#8630;</button>
+            <button id="tl-redo" class="tlbtn" aria-label="Redo">&#8631;</button>
+            <span class="tl-sep"></span>
+            <button id="tl-split" class="tlbtn wide">Split</button>
+            <button id="tl-delete" class="tlbtn wide danger">Delete</button>
+            <span class="tl-sep"></span>
+            <button id="tl-zoomout" class="tlbtn" aria-label="Zoom out">&minus;</button>
+            <button id="tl-zoomin" class="tlbtn" aria-label="Zoom in">+</button>
+            <span class="tl-time" id="tl-time">0:00.0 / 0:00.0</span>
+          </div>
+          <div class="tl-scroll" id="tl-scroll">
+            <div class="tl-track" id="tl-track">
+              <div class="tl-playhead" id="tl-playhead"></div>
+            </div>
+          </div>
         </div>
 
         <div class="tray">
