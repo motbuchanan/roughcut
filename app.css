@@ -95,12 +95,12 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .editbar .cbadge { margin-left: auto; color: var(--muted); font-size: 12px; }
 
 .stage {
-  flex: 1 1 auto; display: grid; place-items: center; background: #0d0f13;
-  padding: 12px; min-height: 0;
+  flex: 1 1 auto; min-height: 0; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  background: #0d0f13; padding: 12px; overflow: hidden;
 }
-.preview-frame { position: relative; max-width: 100%; max-height: 100%; }
 #preview {
-  display: block; max-width: 100%; max-height: 100%;
+  display: block; max-width: 100%; max-height: 100%; width: auto; height: auto;
   background: #000; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,.5);
 }
 #preview-hint {
