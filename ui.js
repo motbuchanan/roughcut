@@ -4,12 +4,12 @@
 
 import {
   listProjects, createProject, loadProject, renameProject, deleteProject,
-  readThumb, scheduleSave, flushSave, CANVAS_PRESETS, loadPrefs,
+  readThumb, scheduleSave, flushSave, CANVAS_PRESETS, loadPrefs, sToUs,
 } from './state.js';
 import { importFile } from './media.js';
 import { Preview } from './preview.js';
 import {
-  CommandBus, addClipCmd, TimelineView, sourceSecAt, mainTrack, normalize, fmtTime,
+  CommandBus, addClipCmd, TimelineView, sourceSecAt, mainTrack, normalize, totalUs, fmtTime,
 } from './timeline.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -19,6 +19,7 @@ let current = null;     // current project
 let previewer = null;   // Preview
 let bus = null;         // CommandBus
 let view = null;        // TimelineView
+let playRAF = null, playStartT = 0, playStartUs = 0;
 const thumbUrls = new Map();
 
 // ---- toasts --------------------------------------------------------------
@@ -100,33 +101,34 @@ async function openEditor(id) {
 
   bus = new CommandBus(onBusChange);
   view = new TimelineView({
-    scrollEl: els.tlScroll, trackEl: els.tlTrack, playheadEl: els.tlPlayhead, timeEl: els.tlTime,
+    scrollEl: els.tlScroll, trackEl: els.tlTrack, playheadEl: els.tlPlayhead, timeEl: els.tpTime,
     project: current, bus,
     getMedia: (mid) => current.media.find((m) => m.id === mid) || null,
     getThumb: (mid) => thumbUrls.get(mid) || null,
-    onPlayheadChange: () => refreshPreview(),
+    onPlayheadChange: (us) => onPlayheadMoved(us),
     onSelect: () => updateToolbar(),
     toast,
   });
 
   renderMediaStrip();
   view.render();
-  refreshPreview();
+  onPlayheadMoved(0);
   updateToolbar();
   showScreen('editor');
 }
 async function closeEditor() {
+  pausePlay();
   await flushSave();
   if (previewer) previewer.dispose();
-  if (view) { /* view holds no timers */ }
   clearThumbUrls();
   current = null; bus = null; view = null; previewer = null;
   renderList(); showScreen('list');
 }
 
 function onBusChange() {
+  pausePlay();
   view.render();
-  view.setPlayhead(view.playheadUs);   // reclamp to (possibly new) total, refresh preview
+  view.setPlayhead(view.playheadUs);   // reclamp to (possibly new) total, refresh preview + slider
   updateToolbar();
   scheduleSave(current);
 }
@@ -137,6 +139,10 @@ function updateToolbar() {
   els.tlRedo.disabled = !bus.canRedo;
   els.tlSplit.disabled = clips === 0;
   els.tlDelete.disabled = !view.selectedId;
+  const has = clips > 0;
+  els.tpPlay.disabled = !has;
+  els.tpSeek.disabled = !has;
+  els.tpStart.disabled = !has;
 }
 
 function refreshPreview() {
@@ -146,6 +152,44 @@ function refreshPreview() {
   const media = current.media.find((m) => m.id === clip.mediaId) || null;
   previewer.renderAt(current, media, sourceSec);
 }
+
+// single funnel for every playhead move (slider, play loop, select, edit)
+function onPlayheadMoved(us) {
+  const total = totalUs(current);
+  const val = total > 0 ? Math.round((us / total) * 1000) : 0;
+  if (String(els.tpSeek.value) !== String(val)) els.tpSeek.value = val; // programmatic set, no input event
+  refreshPreview();
+}
+
+function onSeekInput() {
+  pausePlay();
+  const total = totalUs(current);
+  const us = (parseInt(els.tpSeek.value, 10) / 1000) * total;
+  view.setPlayhead(us, { scroll: true });
+}
+
+function startPlay() {
+  const total = totalUs(current);
+  if (total <= 0) return;
+  if (view.playheadUs >= total - 1000) view.setPlayhead(0);
+  playStartT = performance.now();
+  playStartUs = view.playheadUs;
+  els.tpPlay.innerHTML = '&#10073;&#10073;'; // pause glyph
+  const step = () => {
+    const elapsed = performance.now() - playStartT;
+    const us = playStartUs + sToUs(elapsed / 1000);
+    if (us >= total) { view.setPlayhead(total, { scroll: true }); pausePlay(); return; }
+    view.setPlayhead(us, { scroll: true });
+    playRAF = requestAnimationFrame(step);
+  };
+  playRAF = requestAnimationFrame(step);
+}
+function pausePlay() {
+  if (playRAF) cancelAnimationFrame(playRAF);
+  playRAF = null;
+  if (els.tpPlay) els.tpPlay.innerHTML = '&#9654;'; // play glyph
+}
+function togglePlay() { if (playRAF) pausePlay(); else startPlay(); }
 
 // ---- media bin -----------------------------------------------------------
 function clearThumbUrls() {
@@ -216,8 +260,9 @@ export function initUI() {
     importBtn: $('#import-btn'), fileInput: $('#file-input'),
     badge: $('#badge'),
     tlUndo: $('#tl-undo'), tlRedo: $('#tl-redo'), tlSplit: $('#tl-split'), tlDelete: $('#tl-delete'),
-    tlZoomOut: $('#tl-zoomout'), tlZoomIn: $('#tl-zoomin'), tlTime: $('#tl-time'),
+    tlZoomOut: $('#tl-zoomout'), tlZoomIn: $('#tl-zoomin'),
     tlScroll: $('#tl-scroll'), tlTrack: $('#tl-track'), tlPlayhead: $('#tl-playhead'),
+    tpStart: $('#tp-start'), tpPlay: $('#tp-play'), tpSeek: $('#tp-seek'), tpTime: $('#tp-time'),
   };
 
   els.newBtn.addEventListener('click', newProjectFlow);
@@ -234,6 +279,10 @@ export function initUI() {
   els.tlDelete.addEventListener('click', () => view.deleteSelected());
   els.tlZoomOut.addEventListener('click', () => view.zoomBy(1 / 1.5));
   els.tlZoomIn.addEventListener('click', () => view.zoomBy(1.5));
+
+  els.tpPlay.addEventListener('click', togglePlay);
+  els.tpStart.addEventListener('click', () => { pausePlay(); view.setPlayhead(0, { scroll: true }); });
+  els.tpSeek.addEventListener('input', onSeekInput);
 
   renderList();
   showScreen('list');
