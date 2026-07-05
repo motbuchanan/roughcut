@@ -1,208 +1,80 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>RoughCut · capability probe</title>
-<style>
-  :root{
-    --bg:#16181d; --panel:#1e2128; --line:#2c303a;
-    --ink:#e7e9ef; --dim:#8b909e;
-    --orange:#ff7a2f; --red:#ff4b3e; --green:#3fae7a; --amber:#e8c15a;
-    --video:#7b7ff2;
-  }
-  *{box-sizing:border-box}
-  html,body{margin:0}
-  body{
-    background:var(--bg); color:var(--ink);
-    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    -webkit-font-smoothing:antialiased;
-    padding:max(18px,env(safe-area-inset-top)) 18px max(28px,env(safe-area-inset-bottom));
-    max-width:640px; margin:0 auto;
-  }
-  .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-  header{display:flex; align-items:center; gap:12px; margin-bottom:6px}
-  .mark{flex:none}
-  h1{font-size:22px; margin:0; letter-spacing:.3px}
-  h1 b{color:var(--orange); font-weight:700}
-  .badge{
-    margin-left:auto; font-size:11px; color:var(--dim);
-    border:1px solid var(--line); border-radius:999px;
-    padding:4px 9px; background:var(--panel); cursor:pointer; user-select:none;
-  }
-  .sub{color:var(--dim); font-size:13px; margin:0 0 20px}
-  .verdict{
-    border:1px solid var(--line); border-radius:12px; background:var(--panel);
-    padding:14px 16px; margin-bottom:16px; display:flex; gap:12px; align-items:center;
-  }
-  .verdict .big{font-size:15px; font-weight:600}
-  .verdict.pass{border-color:#2f5f4a; background:#182420}
-  .verdict.fail{border-color:#5f2f2c; background:#241817}
-  .verdict.run{border-color:#5f552c}
-  .dot{width:11px; height:11px; border-radius:50%; flex:none; background:var(--amber)}
-  .dot.ok{background:var(--green)} .dot.no{background:var(--red)}
-  ul.checks{list-style:none; margin:0; padding:0;
-    border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--panel)}
-  ul.checks li{display:flex; gap:12px; align-items:flex-start;
-    padding:13px 15px; border-top:1px solid var(--line)}
-  ul.checks li:first-child{border-top:0}
-  .lbl{font-weight:600; font-size:14px}
-  .meta{color:var(--dim); font-size:12.5px; margin-top:2px}
-  .meta code{color:var(--video); font-size:12px}
-  footer{color:var(--dim); font-size:12px; margin-top:18px; line-height:1.6}
-  footer .k{color:var(--ink)}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#16181d" />
+  <title>RoughCut</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="stylesheet" href="app.css" />
 </head>
 <body>
-<header>
-  <svg class="mark" width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
-    <rect x="0" y="0" width="30" height="30" rx="7" fill="#1e2128" stroke="#2c303a"/>
-    <polygon points="11,8 11,22 23,15" fill="#ff7a2f"/>
-    <rect x="8" y="7" width="1.6" height="16" fill="#ff4b3e"/>
-  </svg>
-  <h1 class="mono">Rough<b>Cut</b></h1>
-  <span class="badge mono" id="badge">probe · Jul 4</span>
-</header>
-<p class="sub">Pages pipeline test and device capability probe. If this page renders, the repo serves. The checks below decide whether this phone can run the real app. M0 overwrites this file.</p>
+  <div id="app">
+    <header class="topbar">
+      <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
+      <button id="badge" class="badge" title="Tap for version">v0.2 &middot; Jul 4</button>
+    </header>
 
-<div class="verdict run" id="verdict">
-  <span class="dot" id="vdot"></span>
-  <span class="big" id="vtext">Running checks&hellip;</span>
-</div>
+    <main>
+      <!-- LIST -->
+      <section class="screen active" data-screen="list" id="screen-list">
+        <div class="list-head">
+          <h1>Projects</h1>
+          <button id="new-project" class="primary" style="margin-left:auto">+ New</button>
+        </div>
+        <div id="project-list"></div>
+        <div id="empty-list" class="empty">No projects yet. Tap <b>+ New</b> to start a cut.</div>
+      </section>
 
-<ul class="checks" id="list"></ul>
+      <!-- EDITOR -->
+      <section class="screen" data-screen="editor" id="screen-editor">
+        <div class="editbar">
+          <button id="editor-back" class="iconbtn" aria-label="Back">&#8592;</button>
+          <span class="title" id="editor-title">Project</span>
+          <span class="cbadge" id="canvas-badge"></span>
+        </div>
 
-<footer>
-  <span class="k">Green across the board</span> means the WebCodecs export path is viable here, no fallback needed.<br>
-  A red on <span class="k">H.264</span> or <span class="k">AAC</span> means this browser cannot encode; use Chrome or Edge.<br>
-  Tap the badge to confirm the file version.
-</footer>
+        <div class="stage">
+          <div class="preview-frame">
+            <canvas id="preview" width="405" height="720"></canvas>
+            <div id="preview-hint">Import clips below, then tap one to preview and scrub.</div>
+          </div>
+        </div>
 
-<script>
-"use strict";
-(function(){
-  var badge = document.getElementById('badge');
-  badge.addEventListener('click', function(){
-    var t = badge.textContent; badge.textContent = 'RoughCut capability probe';
-    setTimeout(function(){ badge.textContent = t; }, 1400);
-  });
+        <div class="scrub-wrap" id="scrub-wrap" style="display:none">
+          <div class="scrub-time" id="scrub-time">0:00.0 / 0:00.0</div>
+          <input type="range" id="scrub" min="0" max="1" step="0.01" value="0" />
+        </div>
 
-  var list = document.getElementById('list');
-  var rows = {};
-  function addRow(id, label){
-    var li = document.createElement('li');
-    li.innerHTML = '<span class="dot" data-d="'+id+'"></span>'+
-      '<div><div class="lbl">'+label+'</div>'+
-      '<div class="meta" data-m="'+id+'">checking&hellip;</div></div>';
-    list.appendChild(li);
-    rows[id] = {
-      dot: li.querySelector('[data-d="'+id+'"]'),
-      meta: li.querySelector('[data-m="'+id+'"]')
-    };
-  }
-  function set(id, ok, msg){
-    rows[id].dot.className = 'dot ' + (ok ? 'ok' : 'no');
-    rows[id].meta.innerHTML = msg;
-    return ok;
-  }
+        <div class="tray">
+          <div class="tray-head">
+            <span class="label">Media</span>
+            <button id="import-btn" class="primary">+ Import</button>
+            <input type="file" id="file-input" accept="video/*,image/*,audio/*" multiple hidden />
+          </div>
+          <div class="media-strip" id="media-strip"></div>
+          <div class="strip-empty" id="strip-empty">Nothing imported yet.</div>
+        </div>
+      </section>
 
-  addRow('secure','Secure context');
-  addRow('wc','WebCodecs API');
-  addRow('opfs','Origin private file system');
-  addRow('h264','H.264 1080p encode');
-  addRow('aac','AAC-LC audio encode');
-  addRow('store','Storage estimate');
+      <!-- CAPABILITY FAIL -->
+      <section class="screen" data-screen="capability" id="screen-capability">
+        <div class="cap-card">
+          <h2>This browser can&rsquo;t run RoughCut</h2>
+          <p>RoughCut exports real H.264 + AAC video in the browser, which needs Chrome or Edge on Android, Windows, or macOS. Here&rsquo;s what&rsquo;s missing:</p>
+          <ul id="cap-reasons"></ul>
+          <p>Open RoughCut in Chrome on your phone and it should work.</p>
+        </div>
+      </section>
+    </main>
+  </div>
 
-  var critical = [];
+  <div id="toast" role="status" aria-live="polite"></div>
 
-  // 1. secure context (Pages is https; file:// or http will fail the real app)
-  critical.push(set('secure', !!window.isSecureContext,
-    window.isSecureContext ? 'https, good' :
-    'not secure. OPFS, service worker and modules need the Pages URL'));
-
-  // 2. WebCodecs surface
-  var wc = (typeof VideoEncoder!=='undefined') && (typeof VideoDecoder!=='undefined') &&
-           (typeof AudioEncoder!=='undefined') && (typeof AudioDecoder!=='undefined');
-  var wcMsg = wc ? 'VideoEncoder, VideoDecoder, AudioEncoder, AudioDecoder present' :
-    'missing: ' + ['VideoEncoder','VideoDecoder','AudioEncoder','AudioDecoder']
-      .filter(function(n){ return typeof window[n]==='undefined'; }).join(', ');
-  critical.push(set('wc', wc, wcMsg));
-
-  // 3. OPFS
-  var opfs = !!(navigator.storage && navigator.storage.getDirectory);
-  critical.push(set('opfs', opfs, opfs ? 'available for copied media' :
-    'not available in this browser'));
-
-  var h264List = [
-    ['avc1.640028','High 4.0'],
-    ['avc1.4d0028','Main 4.0'],
-    ['avc1.42e028','Constrained Baseline 4.0']
-  ];
-
-  async function checkVideo(){
-    if(typeof VideoEncoder==='undefined' || !VideoEncoder.isConfigSupported){
-      return set('h264', false, 'VideoEncoder.isConfigSupported unavailable');
-    }
-    for(var i=0;i<h264List.length;i++){
-      var codec = h264List[i][0], name = h264List[i][1];
-      try{
-        var r = await VideoEncoder.isConfigSupported({
-          codec: codec, width:1080, height:1920, bitrate:8e6, framerate:30
-        });
-        if(r && r.supported){
-          return set('h264', true, name + ' &middot; <code>'+codec+'</code>' +
-            (r.config && r.config.hardwareAcceleration ? '' : ''));
-        }
-      }catch(e){}
-    }
-    return set('h264', false, 'no supported H.264 profile at 1080p');
-  }
-
-  async function checkAudio(){
-    if(typeof AudioEncoder==='undefined' || !AudioEncoder.isConfigSupported){
-      return set('aac', false, 'AudioEncoder unavailable (no MP4 audio here)');
-    }
-    try{
-      var r = await AudioEncoder.isConfigSupported({
-        codec:'mp4a.40.2', sampleRate:48000, numberOfChannels:2, bitrate:160000
-      });
-      if(r && r.supported) return set('aac', true, 'AAC-LC &middot; <code>mp4a.40.2</code> 48kHz stereo');
-      return set('aac', false, 'AAC-LC reported unsupported');
-    }catch(e){
-      return set('aac', false, 'check failed: ' + (e && e.name || 'error'));
-    }
-  }
-
-  async function checkStore(){
-    if(!(navigator.storage && navigator.storage.estimate)){
-      return set('store', true, 'estimate API not exposed (non-blocking)');
-    }
-    try{
-      var e = await navigator.storage.estimate();
-      var gb = e.quota ? (e.quota/1073741824).toFixed(1) : '?';
-      var used = e.usage ? (e.usage/1048576).toFixed(0) : '0';
-      return set('store', true, '~' + gb + ' GB available, ' + used + ' MB used');
-    }catch(err){
-      return set('store', true, 'estimate unavailable (non-blocking)');
-    }
-  }
-
-  (async function(){
-    var vOk = await checkVideo();
-    var aOk = await checkAudio();
-    await checkStore();
-    critical.push(vOk, aOk);
-
-    var allGo = critical.every(Boolean);
-    var v = document.getElementById('verdict');
-    var vd = document.getElementById('vdot');
-    var vt = document.getElementById('vtext');
-    v.className = 'verdict ' + (allGo ? 'pass' : 'fail');
-    vd.className = 'dot ' + (allGo ? 'ok' : 'no');
-    vt.textContent = allGo ? 'This device can run RoughCut'
-      : 'This device is missing something RoughCut needs';
-  })();
-})();
-</script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
