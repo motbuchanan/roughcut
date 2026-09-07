@@ -157,37 +157,71 @@ export function fmtTime(us) {
 
 // =========================================================================
 // Timeline view (DOM). Instantiated by ui.js. No DOM access at import time.
+//
+// v0.7 model: the playhead is a FIXED line at the center of the viewport and the
+// strip scrolls underneath it (native horizontal scroll). Scrolling is scrubbing.
+// Tap a clip = select. Long-press a clip = lift to reorder. Drag a handle = trim.
+// Pinch = zoom. Nothing else on the strip intercepts the finger.
 // =========================================================================
-const SNAP_PX = 8;
-const DRAG_THRESH = 8;
-const MIN_PPS = 20, MAX_PPS = 240, DEFAULT_PPS = 60;
+const SNAP_PX = 10;
+const TAP_SLOP = 14;          // px of wobble still counted as a tap
+const TAP_MS = 450;
+const LONGPRESS_MS = 340;
+const MIN_PPS = 16, MAX_PPS = 320, DEFAULT_PPS = 64;
+const EDGE_PX = 48;           // autoscroll zone while reordering
+const EDGE_SPEED = 9;         // px per tick
+
+function haptic(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (_) {} }
 
 export class TimelineView {
   constructor(opts) {
-    this.scrollEl = opts.scrollEl;
-    this.trackEl = opts.trackEl;
-    this.playheadEl = opts.playheadEl;
+    this.scrollEl = opts.scrollEl;       // the horizontal scroller
+    this.trackEl = opts.trackEl;         // the wide strip inside it
     this.timeEl = opts.timeEl;
     this.project = opts.project;
     this.bus = opts.bus;
     this.getMedia = opts.getMedia;       // (mediaId) -> media record
     this.getThumb = opts.getThumb;       // (mediaId) -> url | null
     this.onPlayheadChange = opts.onPlayheadChange || (() => {});
+    this.onUserScrub = opts.onUserScrub || (() => {});   // finger touched the strip: pause playback
     this.onSelect = opts.onSelect || (() => {});
     this.toast = opts.toast || (() => {});
 
-    this.pps = DEFAULT_PPS;              // pixels per second (zoom)
+    this.pps = DEFAULT_PPS;
     this.playheadUs = 0;
     this.selectedId = null;
-    this._drag = null;
+    this._drag = null;                   // { mode: 'tap' | 'trim' | 'reorder', ... }
+    this._press = null;                  // long-press timer
+    this._pinch = null;
+    this._els = new Map();               // clipId -> element
+    this._padPx = 0;
 
-    this.trackEl.addEventListener('pointerdown', (e) => this._onPointerDown(e));
-    this.trackEl.addEventListener('pointermove', (e) => this._onPointerMove(e));
-    this.trackEl.addEventListener('pointerup', (e) => this._onPointerUp(e));
-    this.trackEl.addEventListener('pointercancel', (e) => this._onPointerUp(e));
+    const s = this.scrollEl, t = this.trackEl;
+    s.addEventListener('scroll', () => this._onScroll(), { passive: true });
+    s.addEventListener('scrollend', () => this._onScrollEnd());
+    s.addEventListener('pointerdown', () => this.onUserScrub(), { passive: true });
+    s.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
+
+    t.addEventListener('pointerdown', (e) => this._onPointerDown(e));
+    t.addEventListener('pointermove', (e) => this._onPointerMove(e));
+    t.addEventListener('pointerup', (e) => this._onPointerUp(e));
+    t.addEventListener('pointercancel', (e) => this._onPointerCancel(e));
+    // Non-passive so a lifted clip can veto the browser's pan once reorder starts.
+    t.addEventListener('touchmove', (e) => { if (this._drag && this._drag.mode !== 'tap') e.preventDefault(); }, { passive: false });
+    t.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    s.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: true });
+    s.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
+    s.addEventListener('touchend', (e) => this._onTouchEnd(e), { passive: true });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this._ro = new ResizeObserver(() => this._onResize());
+      this._ro.observe(s);
+    }
   }
 
   setProject(p) { this.project = p; this.selectedId = null; this.playheadUs = 0; this.render(); }
+  dispose() { if (this._ro) this._ro.disconnect(); this._stopEdgeScroll(); }
 
   // ---- geometry ----
   _pxToUs(px) { return sToUs(px / this.pps); }
@@ -199,76 +233,146 @@ export class TimelineView {
     for (const c of t.clips) { acc += clipDurUs(c); bs.push(acc); }
     return bs;
   }
-  _snapUs(us) {
+  _nearestBoundary(us) {
+    let best = null, bestD = Infinity;
     for (const b of this._boundaries()) {
-      if (Math.abs(this._usToPx(us) - this._usToPx(b)) <= SNAP_PX) return b;
+      const d = Math.abs(this._usToPx(us) - this._usToPx(b));
+      if (d < bestD) { bestD = d; best = b; }
     }
-    return us;
+    return { us: best, px: bestD };
   }
-  _contentX(clientX) { return clientX - this.trackEl.getBoundingClientRect().left; }
+  // strip x (relative to trackEl) for a timeline time
+  _tlX(us) { return this._padPx + this._usToPx(us); }
+  _contentUs(clientX) {
+    const x = clientX - this.trackEl.getBoundingClientRect().left - this._padPx;
+    return this._pxToUs(x);
+  }
 
-  // ---- render ----
+  // ---- render (creates elements) / layout (positions them in place) ----
   render() {
     const t = mainTrack(this.project);
-    const total = normalize(this.project);
-    // clear clip blocks (keep the playhead element)
-    [...this.trackEl.querySelectorAll('.tl-clip')].forEach((n) => n.remove());
-    const trackW = Math.max(this._usToPx(total) + 40, this.scrollEl.clientWidth);
-    this.trackEl.style.width = trackW + 'px';
-
-    for (const c of t.clips) {
-      const el = document.createElement('div');
-      el.className = 'tl-clip' + (c.id === this.selectedId ? ' selected' : '');
-      el.dataset.id = c.id;
-      el.style.left = this._usToPx(c.tlStartUs) + 'px';
-      el.style.width = Math.max(6, this._usToPx(clipDurUs(c))) + 'px';
-      const url = this.getThumb ? this.getThumb(c.mediaId) : null;
-      if (url) el.style.backgroundImage = `url("${url}")`;
-      const label = document.createElement('span');
-      label.className = 'tl-clip-label';
-      label.textContent = fmtTime(clipDurUs(c));
-      el.appendChild(label);
-      if (c.id === this.selectedId) {
-        const hl = document.createElement('div'); hl.className = 'tl-handle tl-handle-l'; hl.dataset.handle = 'l';
-        const hr = document.createElement('div'); hr.className = 'tl-handle tl-handle-r'; hr.dataset.handle = 'r';
-        el.appendChild(hl); el.appendChild(hr);
-      }
-      this.trackEl.appendChild(el);
+    normalize(this.project);
+    this._padPx = Math.round(this.scrollEl.clientWidth / 2);
+    // drop elements for clips that no longer exist
+    for (const [id, el] of this._els) {
+      if (!t.clips.some((c) => c.id === id)) { el.remove(); this._els.delete(id); }
     }
-    this._renderPlayhead();
-    if (this.timeEl) this.timeEl.textContent = `${fmtTime(this.playheadUs)} / ${fmtTime(total)}`;
-  }
-  _renderPlayhead() {
-    this.playheadEl.style.left = this._usToPx(this.playheadUs) + 'px';
+    // ensure an element per clip, in order
+    for (const c of t.clips) {
+      let el = this._els.get(c.id);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'tl-clip';
+        el.dataset.id = c.id;
+        el.innerHTML = '<div class="tl-clip-thumb"></div><span class="tl-clip-label"></span>'
+          + '<div class="tl-handle tl-handle-l" data-handle="l"></div><div class="tl-handle tl-handle-r" data-handle="r"></div>';
+        const url = this.getThumb ? this.getThumb(c.mediaId) : null;
+        if (url) el.querySelector('.tl-clip-thumb').style.backgroundImage = `url("${url}")`;
+        this._els.set(c.id, el);
+      }
+      this.trackEl.appendChild(el); // appendChild moves existing nodes, so order follows the model
+    }
+    this._renderRuler();
+    this._layout();
   }
 
-  setPlayhead(us, { scroll = false } = {}) {
+  _layout() {
+    const t = mainTrack(this.project);
+    const total = normalize(this.project);
+    this.trackEl.style.width = (this._padPx * 2 + this._usToPx(total)) + 'px';
+    for (const c of t.clips) {
+      const el = this._els.get(c.id); if (!el) continue;
+      el.style.left = this._tlX(c.tlStartUs) + 'px';
+      el.style.width = Math.max(8, this._usToPx(clipDurUs(c))) + 'px';
+      el.classList.toggle('selected', c.id === this.selectedId);
+      el.querySelector('.tl-clip-label').textContent = fmtTime(clipDurUs(c));
+    }
+    this._layoutRuler(total);
+    this._updateTime(total);
+  }
+
+  _renderRuler() {
+    let r = this.trackEl.querySelector('.tl-ruler');
+    if (!r) { r = document.createElement('div'); r.className = 'tl-ruler'; this.trackEl.prepend(r); }
+  }
+  _layoutRuler(total) {
+    const r = this.trackEl.querySelector('.tl-ruler'); if (!r) return;
+    r.innerHTML = '';
+    const secs = usToS(total);
+    // tick every 1s, label every N so labels stay ~>56px apart
+    const every = Math.max(1, Math.ceil(56 / this.pps));
+    const frag = document.createDocumentFragment();
+    for (let s = 0; s <= Math.ceil(secs); s++) {
+      const tick = document.createElement('span');
+      const major = s % every === 0;
+      tick.className = 'tl-tick' + (major ? ' major' : '');
+      tick.style.left = this._tlX(sToUs(s)) + 'px';
+      if (major) tick.dataset.t = fmtTime(sToUs(s)).replace(/\.\d$/, '');
+      frag.appendChild(tick);
+    }
+    r.appendChild(frag);
+  }
+
+  _updateTime(total) {
+    if (this.timeEl) this.timeEl.textContent = `${fmtTime(this.playheadUs)} / ${fmtTime(total ?? normalize(this.project))}`;
+  }
+
+  // ---- playhead <-> scroll ----
+  _onScroll() {
+    if (this._pinch) return;
+    const total = normalize(this.project);
+    const us = Math.max(0, Math.min(this._pxToUs(this.scrollEl.scrollLeft), total));
+    if (us === this.playheadUs) return;
+    this.playheadUs = us;
+    this._updateTime(total);
+    this.onPlayheadChange(us);
+  }
+  _onScrollEnd() {
+    if (this._drag || this._pinch || this._playing) return;
+    const near = this._nearestBoundary(this.playheadUs);
+    if (near.us != null && near.px > 0.5 && near.px <= SNAP_PX) {
+      this.scrollEl.scrollTo({ left: this._usToPx(near.us), behavior: 'smooth' });
+      haptic(6);
+    }
+  }
+  _onWheel(e) {
+    // desktop convenience: vertical wheel scrubs horizontally
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { this.scrollEl.scrollLeft += e.deltaY; e.preventDefault(); }
+  }
+  _onResize() {
+    const us = this.playheadUs;
+    this._padPx = Math.round(this.scrollEl.clientWidth / 2);
+    this._layout();
+    this.scrollEl.scrollLeft = this._usToPx(us);
+  }
+
+  setPlaying(on) { this._playing = !!on; }
+
+  setPlayhead(us) {
     const total = normalize(this.project);
     this.playheadUs = Math.max(0, Math.min(us, total));
-    this._renderPlayhead();
-    if (this.timeEl) this.timeEl.textContent = `${fmtTime(this.playheadUs)} / ${fmtTime(total)}`;
-    if (scroll) {
-      const x = this._usToPx(this.playheadUs);
-      const view = this.scrollEl.scrollLeft, w = this.scrollEl.clientWidth;
-      if (x < view + 20 || x > view + w - 20) this.scrollEl.scrollLeft = Math.max(0, x - w / 2);
-    }
+    this.scrollEl.scrollLeft = this._usToPx(this.playheadUs);
+    this._updateTime(total);
     this.onPlayheadChange(this.playheadUs);
   }
 
-  selectClip(id, { moveHead = true } = {}) {
+  selectClip(id, { moveHead = false } = {}) {
     this.selectedId = id;
     const c = mainTrack(this.project).clips.find((x) => x.id === id);
-    this.render();
-    if (c && moveHead) this.setPlayhead(c.tlStartUs, { scroll: true });
+    this._layout();
+    if (c && moveHead) this.setPlayhead(c.tlStartUs);
     this.onSelect(c || null);
   }
 
   // ---- toolbar actions ----
   undo() { this.bus.undo(); }
   redo() { this.bus.redo(); }
-  zoomBy(factor) {
-    this.pps = Math.max(MIN_PPS, Math.min(MAX_PPS, this.pps * factor));
-    this.render();
+  zoomBy(factor) { this.setZoom(this.pps * factor); }
+  setZoom(pps) {
+    const us = this.playheadUs;
+    this.pps = Math.max(MIN_PPS, Math.min(MAX_PPS, pps));
+    this._layout();
+    this.scrollEl.scrollLeft = this._usToPx(us);
   }
   deleteSelected() {
     if (!this.selectedId) { this.toast('Tap a clip first'); return; }
@@ -283,34 +387,50 @@ export class TimelineView {
     const before = mainTrack(this.project).clips.length;
     this.bus.do(splitClipCmd(this.project, clip.id, this.playheadUs));
     if (mainTrack(this.project).clips.length === before) this.toast('Move the playhead into the clip');
+    else haptic(8);
   }
 
   // ---- pointer handling ----
   _onPointerDown(e) {
+    if (this._pinch) return;
     const handle = e.target.closest('.tl-handle');
     const clipEl = e.target.closest('.tl-clip');
-    if (handle && clipEl) {
+    this._clearPress();
+    if (handle && clipEl && clipEl.classList.contains('selected')) {
       this.trackEl.setPointerCapture(e.pointerId);
       const clip = mainTrack(this.project).clips.find((c) => c.id === clipEl.dataset.id);
-      this._drag = { mode: 'trim', side: handle.dataset.handle, id: clip.id,
+      this._drag = { mode: 'trim', side: handle.dataset.handle, id: clip.id, pid: e.pointerId,
         startX: e.clientX, origIn: clip.inUs, origOut: clip.outUs };
+      clipEl.classList.add('trimming');
       return;
     }
     if (clipEl) {
-      this.trackEl.setPointerCapture(e.pointerId);
-      this._drag = { mode: 'clip', id: clipEl.dataset.id, startX: e.clientX, moved: false };
+      this._drag = { mode: 'tap', id: clipEl.dataset.id, pid: e.pointerId, startX: e.clientX, startY: e.clientY, t0: performance.now() };
+      this._press = setTimeout(() => this._liftClip(e), LONGPRESS_MS);
       return;
     }
-    // empty track -> set playhead on tap; leave native horizontal scroll for drags
-    this._drag = { mode: 'scrub' };
-    this.setPlayhead(this._snapUs(this._pxToUs(this._contentX(e.clientX))));
+    // empty strip: a clean tap deselects; drags are native scroll
+    this._drag = { mode: 'tap', id: null, pid: e.pointerId, startX: e.clientX, startY: e.clientY, t0: performance.now() };
+  }
+
+  _liftClip(e) {
+    const d = this._drag; if (!d || d.mode !== 'tap' || !d.id) return;
+    this._press = null;
+    try { this.trackEl.setPointerCapture(d.pid); } catch (_) {}
+    const el = this._els.get(d.id);
+    d.mode = 'reorder'; d.el = el; d.lastX = e.clientX;
+    d.origLeft = parseFloat(el.style.left) || 0;
+    el.classList.add('lifting');
+    if (this.selectedId !== d.id) { this.selectedId = d.id; this._layout(); this.onSelect(mainTrack(this.project).clips.find((c) => c.id === d.id) || null); }
+    haptic(12);
+    this._showInsertion(this._indexForClientX(e.clientX));
   }
 
   _onPointerMove(e) {
     const d = this._drag;
     if (!d) return;
-    if (d.mode === 'scrub') {
-      this.setPlayhead(this._snapUs(this._pxToUs(this._contentX(e.clientX))));
+    if (d.mode === 'tap') {
+      if (Math.abs(e.clientX - d.startX) > TAP_SLOP || Math.abs(e.clientY - d.startY) > TAP_SLOP) { this._clearPress(); this._drag = null; }
       return;
     }
     if (d.mode === 'trim') {
@@ -318,55 +438,71 @@ export class TimelineView {
       const clip = mainTrack(this.project).clips.find((c) => c.id === d.id);
       const media = this.getMedia(clip.mediaId);
       const srcMax = (media && media.kind === 'video' && media.durUs) ? media.durUs : Number.MAX_SAFE_INTEGER;
-      if (d.side === 'l') {
-        clip.inUs = Math.max(0, Math.min(d.origIn + dUs, clip.outUs - MIN_CLIP_US));
-      } else {
-        clip.outUs = Math.min(srcMax, Math.max(d.origOut + dUs, clip.inUs + MIN_CLIP_US));
-      }
-      this.render();
+      if (d.side === 'l') clip.inUs = Math.max(0, Math.min(d.origIn + dUs, clip.outUs - MIN_CLIP_US));
+      else clip.outUs = Math.min(srcMax, Math.max(d.origOut + dUs, clip.inUs + MIN_CLIP_US));
+      this._layout();   // in place: no element churn under the finger
       return;
     }
-    if (d.mode === 'clip') {
-      if (Math.abs(e.clientX - d.startX) > DRAG_THRESH) d.moved = true;
-      if (d.moved) {
-        const idx = this._indexForX(e.clientX);
-        this._showInsertion(idx);
-      }
+    if (d.mode === 'reorder') {
+      d.lastX = e.clientX;
+      d.el.style.transform = `translate(${e.clientX - d.startX}px, -6px) scale(1.04)`;
+      this._showInsertion(this._indexForClientX(e.clientX));
+      this._edgeScroll(e.clientX);
     }
   }
 
   _onPointerUp(e) {
     const d = this._drag;
     this._drag = null;
-    this._clearInsertion();
+    this._clearPress();
+    this._stopEdgeScroll();
     if (!d) return;
+    if (d.mode === 'tap') {
+      const quick = performance.now() - d.t0 <= TAP_MS;
+      const still = Math.abs(e.clientX - d.startX) <= TAP_SLOP && Math.abs(e.clientY - d.startY) <= TAP_SLOP;
+      if (!quick || !still) return;
+      if (d.id) { this.selectClip(d.id); haptic(5); }
+      else if (this.selectedId) { this.selectedId = null; this._layout(); this.onSelect(null); }
+      return;
+    }
     if (d.mode === 'trim') {
+      const el = this._els.get(d.id); if (el) el.classList.remove('trimming');
       const clip = mainTrack(this.project).clips.find((c) => c.id === d.id);
       const newIn = clip.inUs, newOut = clip.outUs;
       clip.inUs = d.origIn; clip.outUs = d.origOut; // revert, then commit as one undoable step
       if (newIn !== d.origIn || newOut !== d.origOut) this.bus.do(trimClipCmd(this.project, d.id, newIn, newOut));
-      else this.render();
+      else this._layout();
       return;
     }
-    if (d.mode === 'clip') {
-      if (!d.moved) { this.selectClip(d.id); return; }
+    if (d.mode === 'reorder') {
+      d.el.classList.remove('lifting'); d.el.style.transform = '';
+      this._clearInsertion();
       const t = mainTrack(this.project);
       const from = t.clips.findIndex((c) => c.id === d.id);
-      let target = this._indexForX(e.clientX);
-      if (target > from) target -= 1; // account for removal shift
-      if (target !== from && target >= 0) { this.selectedId = d.id; this.bus.do(moveClipCmd(this.project, d.id, target)); }
-      else this.render();
-      return;
+      let target = this._indexForClientX(e.clientX);
+      if (target > from) target -= 1;
+      if (target !== from && target >= 0) { this.selectedId = d.id; haptic(8); this.bus.do(moveClipCmd(this.project, d.id, target)); }
+      else this._layout();
     }
   }
+  _onPointerCancel() {
+    // the browser took the gesture (native pan). A tap or a not-yet-lifted press just dies.
+    const d = this._drag;
+    this._clearPress();
+    if (d && d.mode === 'reorder') { d.el.classList.remove('lifting'); d.el.style.transform = ''; this._clearInsertion(); this._layout(); }
+    if (d && d.mode === 'trim') { const c = mainTrack(this.project).clips.find((x) => x.id === d.id); if (c) { c.inUs = d.origIn; c.outUs = d.origOut; } const el = this._els.get(d.id); if (el) el.classList.remove('trimming'); this._layout(); }
+    this._drag = null;
+    this._stopEdgeScroll();
+  }
+  _clearPress() { if (this._press) { clearTimeout(this._press); this._press = null; } }
 
-  _indexForX(clientX) {
-    const cx = this._contentX(clientX) + this.scrollEl.scrollLeft * 0; // content coords already track-relative
+  _indexForClientX(clientX) {
+    const us = this._contentUs(clientX);
     const t = mainTrack(this.project);
     let acc = 0, i = 0;
     for (; i < t.clips.length; i++) {
-      const w = this._usToPx(clipDurUs(t.clips[i]));
-      if (cx < acc + w / 2) return i;
+      const w = clipDurUs(t.clips[i]);
+      if (us < acc + w / 2) return i;
       acc += w;
     }
     return t.clips.length;
@@ -377,7 +513,42 @@ export class TimelineView {
     const t = mainTrack(this.project);
     let acc = 0;
     for (let i = 0; i < idx && i < t.clips.length; i++) acc += clipDurUs(t.clips[i]);
-    bar.style.left = this._usToPx(acc) + 'px';
+    bar.style.left = this._tlX(acc) + 'px';
   }
   _clearInsertion() { const b = this.trackEl.querySelector('.tl-insert'); if (b) b.remove(); }
+
+  _edgeScroll(clientX) {
+    const r = this.scrollEl.getBoundingClientRect();
+    let v = 0;
+    if (clientX < r.left + EDGE_PX) v = -EDGE_SPEED;
+    else if (clientX > r.right - EDGE_PX) v = EDGE_SPEED;
+    if (!v) { this._stopEdgeScroll(); return; }
+    if (this._edge) return;
+    this._edge = setInterval(() => {
+      this.scrollEl.scrollLeft += v;
+      const d = this._drag; if (d && d.mode === 'reorder') this._showInsertion(this._indexForClientX(d.lastX));
+    }, 16);
+  }
+  _stopEdgeScroll() { if (this._edge) { clearInterval(this._edge); this._edge = null; } }
+
+  // ---- pinch zoom (touch) ----
+  _onTouchStart(e) {
+    if (e.touches.length === 2) {
+      this._clearPress(); this._drag = null;
+      const [a, b] = e.touches;
+      this._pinch = { d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), pps0: this.pps, us: this.playheadUs };
+    }
+  }
+  _onTouchMove(e) {
+    if (!this._pinch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const [a, b] = e.touches;
+    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    this.pps = Math.max(MIN_PPS, Math.min(MAX_PPS, this._pinch.pps0 * (d / this._pinch.d0)));
+    this._layout();
+    this.scrollEl.scrollLeft = this._usToPx(this._pinch.us);
+  }
+  _onTouchEnd(e) {
+    if (this._pinch && e.touches.length < 2) { const us = this._pinch.us; this._pinch = null; this.scrollEl.scrollLeft = this._usToPx(us); }
+  }
 }

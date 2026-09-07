@@ -120,11 +120,7 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 }
 .tpbtn.play { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-size: 20px; }
 .tpbtn:disabled { opacity: .35; }
-.tp-seek {
-  flex: 1 1 auto; height: var(--tap); accent-color: var(--playhead);
-  background: transparent; touch-action: none;
-}
-.tp-time { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-time { flex: 1 1 auto; text-align: center; font-size: 14px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ---- timeline (M2) ---- */
 .timeline { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line); }
@@ -140,27 +136,49 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .tl-sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px; flex: 0 0 auto; }
 .tl-time { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 8px; flex: 0 0 auto; }
 
-.tl-scroll { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; background: #0d0f13; }
+.tl-viewport { position: relative; background: #0d0f13; }
+.tl-scroll { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
 .tl-scroll::-webkit-scrollbar { height: 0; }
-.tl-track { position: relative; height: 84px; min-width: 100%; touch-action: pan-x; }
+.tl-track { position: relative; height: 104px; touch-action: pan-x; }
+.tl-ruler { position: absolute; left: 0; right: 0; top: 0; height: 18px; pointer-events: none; }
+.tl-tick { position: absolute; top: 12px; width: 1px; height: 5px; background: var(--line); }
+.tl-tick.major { top: 8px; height: 9px; background: var(--muted); }
+.tl-tick.major::after { content: attr(data-t); position: absolute; left: 3px; top: -10px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tl-clip {
-  position: absolute; top: 8px; height: 68px; background: #000 center/cover no-repeat;
-  border: 2px solid var(--vid); border-radius: 8px; overflow: hidden; box-sizing: border-box; touch-action: none;
+  position: absolute; top: 22px; height: 74px; box-sizing: border-box; touch-action: pan-x;
+  border: 2px solid var(--vid); border-radius: 8px; background: #000;
+  transition: transform .12s ease, box-shadow .12s ease; will-change: transform;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
-.tl-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tl-clip-thumb { position: absolute; inset: 0; border-radius: 6px; background: #000 center/cover no-repeat; overflow: hidden; pointer-events: none; }
+.tl-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); z-index: 3; }
+.tl-clip.lifting { z-index: 8; box-shadow: 0 8px 24px rgba(0,0,0,.6), 0 0 0 2px var(--accent); opacity: .92; transition: none; }
+.tl-clip.trimming { transition: none; }
 .tl-clip-label {
-  position: absolute; left: 4px; bottom: 3px; background: rgba(0,0,0,.7); color: #fff;
+  position: absolute; left: 6px; bottom: 4px; background: rgba(0,0,0,.7); color: #fff;
   font-size: 10px; padding: 1px 5px; border-radius: 5px; font-variant-numeric: tabular-nums; pointer-events: none;
 }
-.tl-handle { position: absolute; top: 0; width: 26px; height: 100%; background: var(--accent); opacity: .95; touch-action: none; }
-.tl-handle-l { left: 0; border-radius: 6px 0 0 6px; }
-.tl-handle-r { right: 0; border-radius: 0 6px 6px 0; }
-.tl-handle::after { content: ''; position: absolute; left: 50%; top: 50%; width: 3px; height: 44%; background: var(--accent-ink); border-radius: 2px; box-shadow: -4px 0 0 var(--accent-ink), 4px 0 0 var(--accent-ink); transform: translate(-50%, -50%); }
-.tl-playhead { position: absolute; top: 0; width: 2px; height: 100%; background: var(--playhead); pointer-events: none; z-index: 5; }
-.tl-playhead::before {
-  content: ''; position: absolute; top: 0; left: -5px;
-  border-left: 6px solid transparent; border-right: 6px solid transparent; border-top: 8px solid var(--playhead);
+/* handles exist on every clip but only show (and only catch touches) on the selected one */
+.tl-handle { position: absolute; top: -2px; bottom: -2px; width: 40px; display: none; touch-action: none; z-index: 4; }
+.tl-clip.selected .tl-handle { display: block; }
+.tl-handle-l { left: -16px; }
+.tl-handle-r { right: -16px; }
+.tl-handle::before { content: ''; position: absolute; top: 0; bottom: 0; width: 18px; background: var(--accent); }
+.tl-handle-l::before { left: 16px; border-radius: 6px 0 0 6px; }
+.tl-handle-r::before { right: 16px; border-radius: 0 6px 6px 0; }
+.tl-handle::after { content: ''; position: absolute; top: 50%; width: 3px; height: 40%; background: var(--accent-ink); border-radius: 2px; transform: translateY(-50%); box-shadow: -4px 0 0 var(--accent-ink), 4px 0 0 var(--accent-ink); }
+.tl-handle-l::after { left: 24px; }
+.tl-handle-r::after { right: 24px; }
+.tl-playhead {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px;
+  background: var(--playhead); pointer-events: none; z-index: 9; box-shadow: 0 0 6px rgba(0,0,0,.8);
 }
+.tl-playhead::before {
+  content: ''; position: absolute; top: 0; left: -6px;
+  border-left: 7px solid transparent; border-right: 7px solid transparent; border-top: 9px solid var(--playhead);
+}
+.tl-hint { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; color: var(--muted); font-size: 11px; pointer-events: none; }
+.tl-hint.hidden { display: none; }
 .tl-insert { position: absolute; top: 0; width: 3px; height: 100%; background: var(--txt); z-index: 6; pointer-events: none; }
 
 .tray { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line); }

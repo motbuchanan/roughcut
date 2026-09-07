@@ -19,7 +19,7 @@ let current = null;     // current project
 let previewer = null;   // Preview
 let bus = null;         // CommandBus
 let view = null;        // TimelineView
-let playRAF = null, playStartT = 0, playStartUs = 0;
+let playTimer = null, playStartT = 0, playStartUs = 0;
 const thumbUrls = new Map();
 
 // ---- toasts --------------------------------------------------------------
@@ -100,12 +100,14 @@ async function openEditor(id) {
   await loadAllThumbs();
 
   bus = new CommandBus(onBusChange);
+  if (view) view.dispose();
   view = new TimelineView({
-    scrollEl: els.tlScroll, trackEl: els.tlTrack, playheadEl: els.tlPlayhead, timeEl: els.tpTime,
+    scrollEl: els.tlScroll, trackEl: els.tlTrack, timeEl: els.tpTime,
     project: current, bus,
     getMedia: (mid) => current.media.find((m) => m.id === mid) || null,
     getThumb: (mid) => thumbUrls.get(mid) || null,
     onPlayheadChange: (us) => onPlayheadMoved(us),
+    onUserScrub: () => pausePlay(),
     onSelect: () => updateToolbar(),
     toast,
   });
@@ -120,6 +122,7 @@ async function closeEditor() {
   pausePlay();
   await flushSave();
   if (previewer) previewer.dispose();
+  if (view) view.dispose();
   clearThumbUrls();
   current = null; bus = null; view = null; previewer = null;
   renderList(); showScreen('list');
@@ -128,7 +131,7 @@ async function closeEditor() {
 function onBusChange() {
   pausePlay();
   view.render();
-  view.setPlayhead(view.playheadUs);   // reclamp to (possibly new) total, refresh preview + slider
+  view.setPlayhead(view.playheadUs);   // reclamp to (possibly new) total, refresh preview
   updateToolbar();
   scheduleSave(current);
 }
@@ -141,8 +144,9 @@ function updateToolbar() {
   els.tlDelete.disabled = !view.selectedId;
   const has = clips > 0;
   els.tpPlay.disabled = !has;
-  els.tpSeek.disabled = !has;
   els.tpStart.disabled = !has;
+  els.tpEnd.disabled = !has;
+  els.tlHint.classList.toggle('hidden', has && bus.undoStack.length > 2);
 }
 
 function refreshPreview() {
@@ -153,21 +157,12 @@ function refreshPreview() {
   previewer.renderAt(current, media, sourceSec);
 }
 
-// single funnel for every playhead move (slider, play loop, select, edit)
-function onPlayheadMoved(us) {
-  const total = totalUs(current);
-  const val = total > 0 ? Math.round((us / total) * 1000) : 0;
-  if (String(els.tpSeek.value) !== String(val)) els.tpSeek.value = val; // programmatic set, no input event
-  refreshPreview();
-}
+// single funnel for every playhead move (strip scroll, play loop, select, edit)
+function onPlayheadMoved(us) { refreshPreview(); }
 
-function onSeekInput() {
-  pausePlay();
-  const total = totalUs(current);
-  const us = (parseInt(els.tpSeek.value, 10) / 1000) * total;
-  view.setPlayhead(us, { scroll: true });
-}
-
+// Playback clock is setTimeout-driven, not rAF: Android battery saver throttles
+// rAF in the background while the page keeps running. M3 moves this to the
+// AudioContext clock once there is audio to sync to.
 function startPlay() {
   const total = totalUs(current);
   if (total <= 0) return;
@@ -175,21 +170,24 @@ function startPlay() {
   playStartT = performance.now();
   playStartUs = view.playheadUs;
   els.tpPlay.innerHTML = '&#10073;&#10073;'; // pause glyph
+  view.setPlaying(true);
   const step = () => {
+    if (!playTimer) return;
     const elapsed = performance.now() - playStartT;
     const us = playStartUs + sToUs(elapsed / 1000);
-    if (us >= total) { view.setPlayhead(total, { scroll: true }); pausePlay(); return; }
-    view.setPlayhead(us, { scroll: true });
-    playRAF = requestAnimationFrame(step);
+    if (us >= total) { view.setPlayhead(total); pausePlay(); return; }
+    view.setPlayhead(us);
+    playTimer = setTimeout(step, 16);
   };
-  playRAF = requestAnimationFrame(step);
+  playTimer = setTimeout(step, 16);
 }
 function pausePlay() {
-  if (playRAF) cancelAnimationFrame(playRAF);
-  playRAF = null;
+  if (playTimer) clearTimeout(playTimer);
+  playTimer = null;
+  if (view) view.setPlaying(false);
   if (els.tpPlay) els.tpPlay.innerHTML = '&#9654;'; // play glyph
 }
-function togglePlay() { if (playRAF) pausePlay(); else startPlay(); }
+function togglePlay() { if (playTimer) pausePlay(); else startPlay(); }
 
 // ---- media bin -----------------------------------------------------------
 function clearThumbUrls() {
@@ -221,7 +219,7 @@ async function onStripClick(e) {
   const m = current.media.find((x) => x.id === tile.dataset.id); if (!m) return;
   if (m.kind === 'audio') { toast('Audio gets its own track in M3'); return; }
   const newId = bus.do(addClipCmd(current, m));
-  view.selectClip(newId);
+  view.selectClip(newId, { moveHead: true });
   toast('Added to timeline');
 }
 
@@ -261,8 +259,8 @@ export function initUI() {
     badge: $('#badge'),
     tlUndo: $('#tl-undo'), tlRedo: $('#tl-redo'), tlSplit: $('#tl-split'), tlDelete: $('#tl-delete'),
     tlZoomOut: $('#tl-zoomout'), tlZoomIn: $('#tl-zoomin'),
-    tlScroll: $('#tl-scroll'), tlTrack: $('#tl-track'), tlPlayhead: $('#tl-playhead'),
-    tpStart: $('#tp-start'), tpPlay: $('#tp-play'), tpSeek: $('#tp-seek'), tpTime: $('#tp-time'),
+    tlScroll: $('#tl-scroll'), tlTrack: $('#tl-track'), tlHint: $('#tl-hint'),
+    tpStart: $('#tp-start'), tpPlay: $('#tp-play'), tpEnd: $('#tp-end'), tpTime: $('#tp-time'),
   };
 
   els.newBtn.addEventListener('click', newProjectFlow);
@@ -281,8 +279,8 @@ export function initUI() {
   els.tlZoomIn.addEventListener('click', () => view.zoomBy(1.5));
 
   els.tpPlay.addEventListener('click', togglePlay);
-  els.tpStart.addEventListener('click', () => { pausePlay(); view.setPlayhead(0, { scroll: true }); });
-  els.tpSeek.addEventListener('input', onSeekInput);
+  els.tpStart.addEventListener('click', () => { pausePlay(); view.setPlayhead(0); });
+  els.tpEnd.addEventListener('click', () => { pausePlay(); view.setPlayhead(totalUs(current)); });
 
   renderList();
   showScreen('list');

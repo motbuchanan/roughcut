@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.6 &middot; Sep 7</button>
+      <button id="badge" class="badge" title="Tap for version">v0.7 &middot; Sep 7</button>
     </header>
 
     <main>
@@ -46,8 +46,8 @@
         <div class="transport">
           <button id="tp-start" class="tpbtn" aria-label="Jump to start">&#9198;</button>
           <button id="tp-play" class="tpbtn play" aria-label="Play/Pause">&#9654;</button>
-          <input type="range" id="tp-seek" class="tp-seek" min="0" max="1000" value="0" step="1" />
           <span id="tp-time" class="tp-time">0:00.0 / 0:00.0</span>
+          <button id="tp-end" class="tpbtn" aria-label="Jump to end">&#9197;</button>
         </div>
 
         <div class="timeline" id="timeline">
@@ -61,10 +61,12 @@
             <button id="tl-zoomout" class="tlbtn" aria-label="Zoom out">&minus;</button>
             <button id="tl-zoomin" class="tlbtn" aria-label="Zoom in">+</button>
           </div>
-          <div class="tl-scroll" id="tl-scroll">
-            <div class="tl-track" id="tl-track">
-              <div class="tl-playhead" id="tl-playhead"></div>
+          <div class="tl-viewport">
+            <div class="tl-scroll" id="tl-scroll">
+              <div class="tl-track" id="tl-track"></div>
             </div>
+            <div class="tl-playhead" id="tl-playhead"></div>
+            <div class="tl-hint" id="tl-hint">Swipe the strip to scrub &middot; tap a clip &middot; hold to move &middot; pinch to zoom</div>
           </div>
         </div>
 
