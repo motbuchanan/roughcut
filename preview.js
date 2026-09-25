@@ -7,6 +7,7 @@
 
 import { Input, BlobSource, ALL_FORMATS, CanvasSink } from './mediabunny.js';
 import { readMedia } from './state.js';
+import { drawTextsAt } from './text.js';
 
 export function draftSize(canvas, maxEdge = 720) {
   const ar = canvas.w / canvas.h;
@@ -23,9 +24,11 @@ export class Preview {
     this.project = null;
     this.cur = null;      // { id, kind, input, sink, bitmap, frameW, frameH }
     this.draft = { w: canvasEl.width, h: canvasEl.height };
-    this._target = null;  // { media, sourceSec }
+    this._target = null;  // { media, sourceSec, tlUs }
     this._busy = false;
     this._dirty = false;
+    this.hitBoxes = [];   // text hit boxes from the last paint (canvas px)
+    this.tlUs = 0;
   }
 
   sizeToProject(project) {
@@ -59,6 +62,7 @@ export class Preview {
   async _ensure(media) {
     if (this.cur && this.cur.id === media.id) return;
     this._disposeCur();
+    if (media.kind === 'color') { this.cur = { id: media.id, kind: 'color', color: media.color || '#000000' }; return; }
     if (media.kind === 'image') {
       const file = await readMedia(this.project.id, media.opfs);
       const bitmap = await createImageBitmap(file);
@@ -75,12 +79,23 @@ export class Preview {
   }
 
   // Public entry: render `media` at `sourceSec`. Coalesces to latest.
-  renderAt(project, media, sourceSec) {
+  renderAt(project, media, sourceSec, tlUs = 0) {
     this.project = project;
-    if (!media) { this._target = null; this.clear(); return; }
-    this._target = { media, sourceSec };
+    this.tlUs = tlUs;
+    if (!media) { this._target = null; this.clear(); this._overlay(); return; }
+    this._target = { media, sourceSec, tlUs };
     if (this._busy) { this._dirty = true; return; }
     this._pump();
+  }
+
+  // Re-draw only the overlay layer on top of the last frame (cheap; used while dragging text).
+  repaintOverlay() {
+    if (this._busy) { this._dirty = true; return; }
+    if (this._target) this._pump(); else { this.clear(); this._overlay(); }
+  }
+  _overlay() {
+    if (!this.project) { this.hitBoxes = []; return; }
+    this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
   }
 
   async _pump() {
@@ -93,7 +108,10 @@ export class Preview {
         try {
           await this._ensure(t.media);
         } catch (e) { this._paintError('open'); break; }
-        if (this.cur.kind === 'image') {
+        this.tlUs = t.tlUs ?? this.tlUs;
+        if (this.cur.kind === 'color') {
+          this.clear(this.cur.color);
+        } else if (this.cur.kind === 'image') {
           this.clear();
           this._drawContained(this.cur.bitmap, this.cur.bitmap.width, this.cur.bitmap.height);
         } else if (this.cur.sink) {
@@ -105,6 +123,7 @@ export class Preview {
         } else {
           this._paintError('no video track');
         }
+        this._overlay();
       } while (this._dirty);
     } finally {
       this._busy = false;

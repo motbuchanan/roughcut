@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.7 &middot; Sep 7</button>
+      <button id="badge" class="badge" title="Tap for version">v0.11 &middot; Sep 25</button>
     </header>
 
     <main>
@@ -36,6 +36,7 @@
           <button id="editor-back" class="iconbtn" aria-label="Back">&#8592;</button>
           <span class="title" id="editor-title">Project</span>
           <span class="cbadge" id="canvas-badge"></span>
+          <button id="export-btn" class="primary export-btn">Export</button>
         </div>
 
         <div class="stage">
@@ -58,8 +59,80 @@
             <button id="tl-split" class="tlbtn wide">Split</button>
             <button id="tl-delete" class="tlbtn wide danger">Delete</button>
             <span class="tl-sep"></span>
+            <button id="tl-text" class="tlbtn wide">+ Text</button>
+            <button id="tl-title" class="tlbtn wide">+ Title</button>
+            <span class="tl-sep"></span>
             <button id="tl-zoomout" class="tlbtn" aria-label="Zoom out">&minus;</button>
             <button id="tl-zoomin" class="tlbtn" aria-label="Zoom in">+</button>
+          </div>
+          <div class="text-sheet hidden" id="text-sheet">
+            <textarea id="ts-text" class="ts-input" rows="2" placeholder="Type your text" autocomplete="off"></textarea>
+            <div class="cs-row">
+              <div class="seg" id="ts-size"></div>
+              <button id="ts-bold" class="tlbtn wide" aria-pressed="true"><b>B</b></button>
+            </div>
+            <div class="cs-row"><div class="seg" id="ts-font"></div></div>
+            <div class="cs-row">
+              <div class="seg" id="ts-align">
+                <button data-v="left">&#8676;</button><button data-v="center">&#8596;</button><button data-v="right">&#8677;</button>
+              </div>
+              <div class="seg" id="ts-bg">
+                <button data-v="none">Plain</button><button data-v="pill">Pill</button><button data-v="band">Band</button>
+              </div>
+            </div>
+            <div class="cs-row">
+              <div class="swatches" id="ts-colors"></div>
+              <button id="ts-dup" class="tlbtn wide" style="margin-left:auto">Duplicate</button>
+            </div>
+            <div class="ts-hint">Drag the text on the preview to place it. <span id="ts-range"></span></div>
+          </div>
+          <div class="clip-sheet hidden" id="clip-sheet">
+            <span class="cs-name" id="cs-name"></span>
+            <div class="cs-row">
+              <span class="cs-label">Vol</span>
+              <input type="range" id="cs-vol" class="cs-vol" min="0" max="200" step="5" value="100" />
+              <span class="cs-val" id="cs-vol-val">100%</span>
+              <button id="cs-mute" class="tlbtn wide">Mute</button>
+            </div>
+            <div class="cs-row">
+              <button id="cs-fadein" class="tlbtn wide grow">Fade in off</button>
+              <button id="cs-fadeout" class="tlbtn wide grow">Fade out off</button>
+            </div>
+            <div class="cs-row hidden" id="cs-tools">
+              <button id="cs-detach" class="tlbtn wide grow">Detach audio</button>
+              <button id="cs-pull" class="tlbtn wide grow">Pull audio to file&hellip;</button>
+            </div>
+          </div>
+          <div class="pull-sheet hidden" id="pull-sheet">
+            <div class="pull-head">
+              <span class="cs-name">Pull audio</span>
+              <button id="pull-close" class="iconbtn" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="chips" id="pull-chips">
+              <button class="chip" data-fmt="copy" aria-pressed="false"><b>Original</b><small>checking&hellip;</small></button>
+              <button class="chip" data-fmt="m4a" aria-pressed="true"><b>M4A</b><small>AAC, small file</small></button>
+              <button class="chip" data-fmt="wav" aria-pressed="false"><b>WAV</b><small>Uncompressed, biggest</small></button>
+            </div>
+            <div class="cs-row">
+              <span class="cs-label">Name</span>
+              <input type="text" id="pull-name" class="pull-name" autocomplete="off" />
+            </div>
+            <label class="cs-row pull-whole-row">
+              <input type="checkbox" id="pull-whole" />
+              <span>Whole file instead of this clip&rsquo;s range (<span id="pull-range"></span>)</span>
+            </label>
+            <button id="pull-run" class="primary pull-run">Pull audio</button>
+            <div class="prog"><i id="pull-bar"></i></div>
+            <div class="pull-status" id="pull-status"></div>
+            <div id="pull-result" class="hidden">
+              <audio id="pull-player" controls preload="metadata"></audio>
+              <div class="cs-row">
+                <button id="pull-save" class="tlbtn wide grow">Save</button>
+                <button id="pull-share" class="tlbtn wide grow">Share</button>
+                <button id="pull-add" class="tlbtn wide grow">Add to project</button>
+              </div>
+              <p class="tip">Save drops it in Downloads. Share sends it to another app. Add to project imports it as music.</p>
+            </div>
           </div>
           <div class="tl-viewport">
             <div class="tl-scroll" id="tl-scroll">
@@ -91,6 +164,55 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <!-- EXPORT OVERLAY -->
+  <div class="export-overlay hidden" id="export-overlay">
+    <div class="export-card">
+      <div class="export-head">
+        <span class="export-title">Export video</span>
+        <button id="export-close" class="iconbtn" aria-label="Close">&#10005;</button>
+      </div>
+      <div id="export-setup">
+        <div class="ex-field">
+          <span class="ex-label">Resolution</span>
+          <div class="seg" id="ex-res">
+            <button data-scale="1" aria-pressed="true">Full</button>
+            <button data-scale="0.6667" aria-pressed="false">720p</button>
+          </div>
+        </div>
+        <div class="ex-field">
+          <span class="ex-label">Frame rate</span>
+          <div class="seg" id="ex-fps">
+            <button data-fps="30" aria-pressed="true">30 fps</button>
+            <button data-fps="24" aria-pressed="false">24 fps</button>
+          </div>
+        </div>
+        <div class="ex-field">
+          <span class="ex-label">Quality</span>
+          <div class="seg" id="ex-quality">
+            <button data-q="high" aria-pressed="true">High</button>
+            <button data-q="medium" aria-pressed="false">Smaller file</button>
+          </div>
+        </div>
+        <div class="ex-summary" id="ex-summary"></div>
+        <button id="export-run" class="primary block">Export</button>
+      </div>
+      <div id="export-progress" class="hidden">
+        <div class="prog"><i id="ex-bar"></i></div>
+        <div class="ex-status" id="ex-status">Starting&hellip;</div>
+        <button id="export-cancel" class="tlbtn wide">Cancel</button>
+      </div>
+      <div id="export-result" class="hidden">
+        <video id="ex-player" controls playsinline preload="metadata"></video>
+        <div class="ex-status ok" id="ex-done"></div>
+        <div class="cs-row">
+          <button id="ex-save" class="primary block">Save</button>
+          <button id="ex-share" class="tlbtn wide">Share</button>
+        </div>
+        <button id="ex-again" class="tlbtn wide" style="margin-top:8px;width:100%">Export again</button>
+      </div>
+    </div>
   </div>
 
   <div id="toast" role="status" aria-live="polite"></div>
