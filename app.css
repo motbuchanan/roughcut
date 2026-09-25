@@ -102,6 +102,7 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 #preview {
   display: block; max-width: 100%; max-height: 100%; width: auto; height: auto;
   background: #000; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,.5);
+  touch-action: none;   /* let tap + drag reach text handlers instead of scrolling the page */
 }
 #preview-hint {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;

@@ -17,7 +17,7 @@ import {
   canEncodeVideo, canEncodeAudio, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
 import { readMedia, usToS, US } from './state.js';
-import { mainTrack, clipDurUs, sourceSecAt, normalize } from './timeline.js';
+import { mainTrack, clipDurUs, normalize } from './timeline.js';
 import { drawTextsAt } from './text.js';
 import { renderTimelineAudio } from './audio.js';
 
@@ -26,39 +26,6 @@ export async function canExport() {
   try { if (!(await canEncodeVideo('avc'))) reasons.push('This browser can’t encode H.264 video.'); }
   catch (e) { reasons.push('H.264 check failed.'); }
   return { ok: reasons.length === 0, reasons };
-}
-
-// Per-media video frame source at export resolution. Letterboxed into WxH.
-class FrameSource {
-  constructor(project, media, W, H) { this.project = project; this.media = media; this.W = W; this.H = H; this.input = null; this.sink = null; this.bitmap = null; this.ready = null; }
-  async _ensure() {
-    if (this.ready) return this.ready;
-    this.ready = (async () => {
-      if (this.media.kind === 'color' || this.media.kind === 'image') {
-        if (this.media.kind === 'image') {
-          const f = await readMedia(this.project.id, this.media.opfs);
-          this.bitmap = await createImageBitmap(f);
-        }
-        return;
-      }
-      const f = await readMedia(this.project.id, this.media.opfs);
-      this.input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
-      const vtrack = await this.input.getPrimaryVideoTrack();
-      this.sink = vtrack ? new CanvasSink(vtrack, { width: this.W, height: this.H, fit: 'contain', poolSize: 2 }) : null;
-    })();
-    return this.ready;
-  }
-  // Draw this media at sourceSec onto ctx (bg already filled by caller).
-  async draw(ctx, sourceSec) {
-    await this._ensure();
-    if (this.media.kind === 'color') { ctx.fillStyle = this.media.color || '#000'; ctx.fillRect(0, 0, this.W, this.H); return; }
-    if (this.media.kind === 'image') { if (this.bitmap) drawContain(ctx, this.bitmap, this.bitmap.width, this.bitmap.height, this.W, this.H); return; }
-    if (!this.sink) return;
-    let wrapped = null;
-    try { wrapped = await this.sink.getCanvas(Math.max(0, sourceSec)); } catch (_) {}
-    if (wrapped && wrapped.canvas) ctx.drawImage(wrapped.canvas, 0, 0, this.W, this.H);
-  }
-  dispose() { if (this.input) { try { this.input.dispose(); } catch (_) {} } if (this.bitmap) { try { this.bitmap.close?.(); } catch (_) {} } this.input = null; this.sink = null; this.bitmap = null; }
 }
 
 function drawContain(ctx, src, sw, sh, W, H) {
@@ -124,32 +91,66 @@ export function exportProject(project, opts = {}) {
     }
     onProgress(0.12);
 
-    // Video: one FrameSource per media, opened lazily, reused across frames.
-    const sources = new Map();
-    const frameSource = (m) => { let s = sources.get(m.id); if (!s) { s = new FrameSource(project, m, W, H); sources.set(m.id, s); } return s; };
+    // Video: walk clips in timeline order, decoding each clip's frames in ONE
+    // sequential pass (canvasesAtTimestamps) instead of a precise seek per output
+    // frame. Seeking per frame re-decoded from the nearest keyframe every time,
+    // which was the ~50x slowdown. Sequential reading decodes each source frame once.
     const dtUs = US / fps;
-    const totalFrames = Math.max(1, Math.round(usToS(total) * fps));
     const frameDur = 1 / fps;
+    const totalFrames = Math.max(1, Math.round(usToS(total) * fps));
+    const frameTimesUs = [];
+    for (let i = 0; i < totalFrames; i++) frameTimesUs.push(Math.min(i * dtUs, total - 1));
 
-    try {
-      for (let i = 0; i < totalFrames; i++) {
-        if (cancelled) throw cancelErr();
-        const tUs = Math.min(i * dtUs, total - 1);
-        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-        const { clip, sourceSec } = sourceSecAt(project, tUs);
-        if (clip) {
-          const m = project.media.find((x) => x.id === clip.mediaId);
-          if (m) await frameSource(m).draw(ctx, sourceSec);
-        }
-        drawTextsAt(ctx, W, H, project, tUs);
-        await videoSource.add(i * frameDur, frameDur);
-        if (i % 3 === 0) onProgress(0.12 + 0.86 * (i / totalFrames));
+    const paintOverlays = (i) => drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
+    const emit = async (i) => { await videoSource.add(i / fps, frameDur); if (i % 4 === 0) onProgress(0.12 + 0.86 * (i / totalFrames)); };
+
+    let gi = 0; // global output-frame cursor; clips are contiguous so this covers 0..totalFrames-1
+    for (const clip of mainTrack(project).clips) {
+      if (cancelled) throw cancelErr();
+      const cs = clip.tlStartUs, ce = cs + clipDurUs(clip);
+      const idxs = [];
+      while (gi < totalFrames && frameTimesUs[gi] < ce) { idxs.push(gi); gi++; }
+      if (!idxs.length) continue;
+      const m = project.media.find((x) => x.id === clip.mediaId);
+
+      if (m && m.kind === 'video') {
+        const f = await readMedia(project.id, m.opfs);
+        const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
+        try {
+          const vtrack = await input.getPrimaryVideoTrack();
+          if (vtrack) {
+            const sink = new CanvasSink(vtrack, { width: W, height: H, fit: 'contain', poolSize: 2 });
+            const tss = idxs.map((i) => usToS(clip.inUs) + usToS(frameTimesUs[i] - cs));
+            let k = 0;
+            for await (const wrapped of sink.canvasesAtTimestamps(tss)) {
+              if (cancelled) throw cancelErr();
+              const i = idxs[k++];
+              ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+              if (wrapped && wrapped.canvas) ctx.drawImage(wrapped.canvas, 0, 0, W, H);
+              paintOverlays(i);
+              await emit(i);
+            }
+            while (k < idxs.length) { const i = idxs[k++]; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+          } else {
+            for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+          }
+        } finally { try { input.dispose(); } catch (_) {} }
+      } else if (m && m.kind === 'image') {
+        const f = await readMedia(project.id, m.opfs);
+        let bmp = null;
+        try { bmp = await createImageBitmap(f); } catch (_) {}
+        try {
+          for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); if (bmp) drawContain(ctx, bmp, bmp.width, bmp.height, W, H); paintOverlays(i); await emit(i); }
+        } finally { if (bmp) bmp.close?.(); }
+      } else {
+        const col = (m && m.kind === 'color') ? (m.color || '#000') : bg;
+        for (const i of idxs) { ctx.fillStyle = col; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
       }
-      onProgress(0.98);
-      await output.finalize();
-    } finally {
-      for (const s of sources.values()) s.dispose();
     }
+    // any trailing frames with no clip (shouldn't happen with contiguous clips)
+    while (gi < totalFrames) { const i = gi++; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+    onProgress(0.98);
+    await output.finalize();
     if (cancelled) throw cancelErr();
     onProgress(1);
     return { blob: new Blob([target.buffer], { type: 'video/mp4' }), ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps };
