@@ -102,7 +102,19 @@ export function exportProject(project, opts = {}) {
     for (let i = 0; i < totalFrames; i++) frameTimesUs.push(Math.min(i * dtUs, total - 1));
 
     const paintOverlays = (i) => drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
-    const emit = async (i) => { await videoSource.add(i / fps, frameDur); if (i % 4 === 0) onProgress(0.12 + 0.86 * (i / totalFrames)); };
+    // Encoder pipeline: CanvasSource.add snapshots the canvas synchronously and
+    // returns a promise that resolves once the encoder accepts the frame. We keep
+    // up to MAX_INFLIGHT of those promises outstanding so the phone encodes frame N
+    // while we composite N+1, instead of stalling on each frame. Awaiting the oldest
+    // when the queue is full gives natural backpressure.
+    const MAX_INFLIGHT = 6;
+    const inflight = [];
+    const emit = async (i) => {
+      const p = videoSource.add(i / fps, frameDur);
+      inflight.push(p);
+      if (inflight.length >= MAX_INFLIGHT) await inflight.shift();
+      if (i % 4 === 0) onProgress(0.12 + 0.86 * (i / totalFrames));
+    };
 
     let gi = 0; // global output-frame cursor; clips are contiguous so this covers 0..totalFrames-1
     for (const clip of mainTrack(project).clips) {
@@ -149,6 +161,7 @@ export function exportProject(project, opts = {}) {
     }
     // any trailing frames with no clip (shouldn't happen with contiguous clips)
     while (gi < totalFrames) { const i = gi++; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+    await Promise.all(inflight);   // drain the encoder queue before finalizing
     onProgress(0.98);
     await output.finalize();
     if (cancelled) throw cancelErr();
