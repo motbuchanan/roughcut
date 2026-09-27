@@ -556,7 +556,7 @@ async function onFilesPicked(fileList) {
 // ---- export (M5) ---------------------------------------------------------
 // Default to 720p (scale 0.6667 of a 1080-wide project): full 1080p in-browser
 // export holds the whole MP4 in memory and can exhaust a phone tab on longer clips.
-let exp = { job: null, blob: null, name: '', scale: 0.6667, fps: 30, quality: 'high', url: null };
+let exp = { job: null, blob: null, name: '', scale: 0.6667, fps: 24, quality: 'high', url: null };
 function exportSummary() {
   const W = Math.round(current.canvas.w * exp.scale / 2) * 2;
   const H = Math.round(current.canvas.h * exp.scale / 2) * 2;

@@ -148,15 +148,25 @@ export function exportProject(project, opts = {}) {
             const sink = new CanvasSink(vtrack, { width: W, height: H, fit: 'contain', poolSize: 2 });
             const tss = idxs.map((i) => usToS(clip.inUs) + usToS(frameTimesUs[i] - cs));
             let k = 0;
-            for await (const wrapped of sink.canvasesAtTimestamps(tss)) {
-              if (cancelled) throw cancelErr();
-              const i = idxs[k++];
-              ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-              if (wrapped && wrapped.canvas) ctx.drawImage(wrapped.canvas, 0, 0, W, H);
-              paintOverlays(i);
-              await emit(i);
+            // A hardware decoder can error on a frame (older phones do this at higher
+            // fps/resolution). Don't throw a multi-minute render away: catch it, hold
+            // the last good frame, and finish. The output keeps full length and length
+            // sync; the tail just repeats the last frame it could decode.
+            try {
+              for await (const wrapped of sink.canvasesAtTimestamps(tss)) {
+                if (cancelled) throw cancelErr();
+                const i = idxs[k++];
+                ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+                if (wrapped && wrapped.canvas) ctx.drawImage(wrapped.canvas, 0, 0, W, H);
+                paintOverlays(i);
+                await emit(i);
+              }
+            } catch (err) {
+              if (err && err.name === 'ExportCanceledError') throw err;
+              console.warn('export: decode fell back at frame', k, 'of', idxs.length, err);
             }
-            while (k < idxs.length) { const i = idxs[k++]; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+            // remaining frames of this clip reuse the last composited canvas as-is
+            while (k < idxs.length) { const i = idxs[k++]; await emit(i); }
           } else {
             for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
           }
