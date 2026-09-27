@@ -554,12 +554,18 @@ async function onFilesPicked(fileList) {
 }
 
 // ---- export (M5) ---------------------------------------------------------
-let exp = { job: null, blob: null, name: '', scale: 1, fps: 30, quality: 'high', url: null };
+// Default to 720p (scale 0.6667 of a 1080-wide project): full 1080p in-browser
+// export holds the whole MP4 in memory and can exhaust a phone tab on longer clips.
+let exp = { job: null, blob: null, name: '', scale: 0.6667, fps: 30, quality: 'high', url: null };
 function exportSummary() {
   const W = Math.round(current.canvas.w * exp.scale / 2) * 2;
   const H = Math.round(current.canvas.h * exp.scale / 2) * 2;
-  const secs = totalUs(current) / 1e6;
+  const full = exp.scale >= 0.999;
   els.exSummary.textContent = `${W}\u00d7${H} \u00b7 ${exp.fps} fps \u00b7 ${fmtTime(totalUs(current))} \u00b7 H.264 + AAC MP4`;
+  // Honest heads-up: full-res export can run a phone out of memory on longer clips.
+  const longFull = full && totalUs(current) > 45 * 1e6;
+  els.exSummary.style.color = longFull ? 'var(--danger)' : '';
+  if (full) els.exSummary.textContent += longFull ? '  \u2014 long clip at Full may not finish on a phone; 720p is safer' : '  \u2014 Full is heavier on phones';
 }
 async function openExport() {
   if (!mainTrack(current).clips.length) { toast('Add clips to the timeline first'); return; }
