@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-  <meta name="theme-color" content="#16181d" />
+  <meta name="theme-color" content="#0b1a20" />
   <title>RoughCut</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.17 &middot; Sep 26</button>
+      <button id="badge" class="badge" title="Tap for version">v0.21 &middot; Sep 27</button>
     </header>
 
     <main>
@@ -28,6 +28,7 @@
         </div>
         <div id="project-list"></div>
         <div id="empty-list" class="empty">No projects yet. Tap <b>+ New</b> to start a cut.</div>
+        <div id="storage-meter" class="storage-meter" hidden><div class="sm-bar"><i id="sm-fill"></i></div><span id="sm-text" class="sm-text"></span></div>
       </section>
 
       <!-- EDITOR -->
@@ -36,6 +37,7 @@
           <button id="editor-back" class="iconbtn" aria-label="Back">&#8592;</button>
           <span class="title" id="editor-title">Project</span>
           <span class="cbadge" id="canvas-badge"></span>
+          <button id="settings-btn" class="iconbtn settings-btn" aria-label="Project settings">&#9881;</button>
           <button id="export-btn" class="primary export-btn">Export</button>
         </div>
 
@@ -97,6 +99,11 @@
             <div class="cs-row">
               <button id="cs-fadein" class="tlbtn wide grow">Fade in off</button>
               <button id="cs-fadeout" class="tlbtn wide grow">Fade out off</button>
+            </div>
+            <div class="cs-row cs-trans-row hidden" id="cs-trans">
+              <span class="cs-label">Cut</span>
+              <div class="seg" id="cs-trans-type"></div>
+              <button id="cs-trans-dur" class="tlbtn" aria-label="Transition length">0.5s</button>
             </div>
             <div class="cs-row hidden" id="cs-tools">
               <button id="cs-detach" class="tlbtn wide grow">Detach audio</button>
@@ -212,6 +219,28 @@
         </div>
         <button id="ex-again" class="tlbtn wide" style="margin-top:8px;width:100%">Export again</button>
       </div>
+    </div>
+  </div>
+
+  <!-- PROJECT SETTINGS OVERLAY -->
+  <div class="export-overlay hidden" id="settings-overlay">
+    <div class="export-card">
+      <div class="export-head">
+        <span class="export-title">Project settings</span>
+        <button id="settings-close" class="iconbtn" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="ex-field">
+        <span class="ex-label">Aspect ratio</span>
+        <div class="seg" id="set-aspect">
+          <button data-k="p916">9:16</button><button data-k="s11">1:1</button><button data-k="l169">16:9</button><button data-k="p45">4:5</button>
+        </div>
+      </div>
+      <div class="ex-field">
+        <span class="ex-label">Background</span>
+        <div class="swatches" id="set-bg"></div>
+      </div>
+      <div class="ex-summary" id="set-summary"></div>
+      <button id="settings-done" class="primary block">Done</button>
     </div>
   </div>
 

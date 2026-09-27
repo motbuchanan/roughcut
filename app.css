@@ -1,18 +1,18 @@
 /* app.css · RoughCut identity (L15) */
 :root {
-  --bg: #16181d;
-  --panel: #1e2128;
-  --panel-2: #252932;
-  --line: #333844;
-  --text: #e6e8ec;
-  --muted: #8a8f9a;
-  --accent: #ff7a2f;
-  --accent-ink: #1a0e05;
-  --playhead: #ff4b3e;
-  --vid: #7b7ff2;
-  --aud: #3fae7a;
-  --txt: #e8c15a;
-  --danger: #e5484d;
+  --bg: #0b1a20;
+  --panel: #10242c;
+  --panel-2: #17313b;
+  --line: #244049;
+  --text: #e7eef0;
+  --muted: #86a0a8;
+  --accent: #f59847;
+  --accent-ink: #17130a;
+  --playhead: #4cf0e0;
+  --vid: #4cf0e0;
+  --aud: #7be495;
+  --txt: #ffd23f;
+  --danger: #ff5d5d;
   --radius: 14px;
   --tap: 48px;
 }
@@ -144,11 +144,11 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .tl-track.has-audio { height: 152px; }
 .tl-track.has-text { height: 138px; }
 .tl-track.has-audio.has-text { height: 186px; }
-.tl-tlane { position: absolute; left: 0; right: 0; top: 102px; height: 30px; background: rgba(232,193,90,.06); border-top: 1px dashed rgba(232,193,90,.3); pointer-events: none; }
+.tl-tlane { position: absolute; left: 0; right: 0; top: 102px; height: 30px; background: rgba(255,210,63,.07); border-top: 1px dashed rgba(255,210,63,.32); pointer-events: none; }
 .tl-track.has-audio .tl-tlane { top: 150px; }
 .tl-tclip {
   position: absolute; top: 105px; height: 26px; box-sizing: border-box; touch-action: pan-x;
-  border: 2px solid var(--txt, #e8c15a); border-radius: 7px; background: rgba(232,193,90,.2);
+  border: 2px solid var(--txt, #ffd23f); border-radius: 7px; background: rgba(255,210,63,.20);
   transition: transform .12s ease, box-shadow .12s ease; will-change: transform;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
@@ -159,10 +159,10 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .tl-tclip-text { position: absolute; left: 6px; right: 6px; top: 3px; color: var(--text); font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .tl-tclip.selected .tl-handle { display: block; }
 .tl-clip.color-card .tl-clip-thumb { background-image: none !important; }
-.tl-alane { position: absolute; left: 0; right: 0; top: 102px; height: 44px; background: rgba(123,127,242,.06); border-top: 1px dashed rgba(123,127,242,.25); pointer-events: none; }
+.tl-alane { position: absolute; left: 0; right: 0; top: 102px; height: 44px; background: rgba(123,229,149,.07); border-top: 1px dashed rgba(123,229,149,.28); pointer-events: none; }
 .tl-aclip {
   position: absolute; top: 106px; height: 40px; box-sizing: border-box; touch-action: pan-x;
-  border: 2px solid var(--aud, #7b7ff2); border-radius: 8px; background: rgba(123,127,242,.22);
+  border: 2px solid var(--aud, #7be495); border-radius: 8px; background: rgba(123,229,149,.20);
   background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 2px, transparent 2px 7px);
   transition: transform .12s ease, box-shadow .12s ease; will-change: transform;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
@@ -186,6 +186,12 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 }
 .tl-clip-thumb { position: absolute; inset: 0; border-radius: 6px; background: #000 center/cover no-repeat; overflow: hidden; pointer-events: none; }
 .tl-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); z-index: 3; }
+/* teal diamond straddling the front cut when a clip has a transition-in */
+.tl-clip.has-trans::before {
+  content: ''; position: absolute; left: 0; top: 50%; width: 13px; height: 13px;
+  margin: -7px 0 0 -7px; background: var(--playhead); transform: rotate(45deg);
+  border: 2px solid var(--bg); border-radius: 3px; z-index: 5; pointer-events: none;
+}
 .tl-clip.lifting { z-index: 8; box-shadow: 0 8px 24px rgba(0,0,0,.6), 0 0 0 2px var(--accent); opacity: .92; transition: none; }
 .tl-clip.trimming { transition: none; }
 .tl-clip-label {
@@ -230,7 +236,8 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 #preview.dragging { cursor: grabbing; }
 
 /* ---- export (M5) ---- */
-.export-btn { margin-left: 8px; padding: 8px 14px; font-size: 14px; }
+.settings-btn { margin-left: 6px; font-size: 20px; min-width: 44px; min-height: 44px; }
+.export-btn { margin-left: 6px; padding: 8px 14px; font-size: 14px; }
 .export-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
 .export-overlay.hidden { display: none; }
 .export-card { width: 100%; max-width: 520px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px 18px 0 0; padding: 16px; max-height: 90vh; overflow: auto; }
@@ -257,6 +264,8 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .cs-val { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 auto; min-width: 56px; text-align: right; }
 .tlbtn.grow { flex: 1 1 auto; }
 .cs-row.hidden { display: none; }
+.cs-trans-row #cs-trans-dur { flex: 0 0 auto; min-width: 52px; font-size: 13px; font-weight: 600; }
+.cs-trans-row #cs-trans-dur:disabled { opacity: .4; }
 
 /* ---- pull audio sheet (v0.9, AudioPull folded in) ---- */
 .pull-sheet { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--panel-2); }
@@ -280,7 +289,7 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .pull-status.ok { color: #3fae7a; }
 #pull-player { width: 100%; margin-bottom: 8px; }
 .tip { font-size: 11px; color: var(--muted); margin: 6px 0 0; }
-.tl-aclip.detached { background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 2px, transparent 2px 7px), linear-gradient(rgba(123,127,242,.12), rgba(123,127,242,.12)); }
+.tl-aclip.detached { background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.08) 0 2px, transparent 2px 7px), linear-gradient(rgba(123,229,149,.14), rgba(123,229,149,.14)); }
 .tlbtn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .tlbtn:disabled { opacity: .35; }
 .tl-insert { position: absolute; top: 0; width: 3px; height: 100%; background: var(--txt); z-index: 6; pointer-events: none; }
@@ -307,6 +316,11 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
   color: #fff; font-size: 10px; padding: 1px 5px; border-radius: 5px; font-variant-numeric: tabular-nums;
 }
 .strip-empty { color: var(--muted); font-size: 13px; padding: 10px 14px 16px; display: flex; }
+
+.storage-meter { margin: 14px 4px 4px; }
+.sm-bar { height: 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.sm-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+.sm-text { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
 
 /* ---- capability screen ---- */
 #screen-capability { padding: 24px; overflow: auto; align-items: center; justify-content: center; }

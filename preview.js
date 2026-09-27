@@ -8,6 +8,7 @@
 import { Input, BlobSource, ALL_FORMATS, CanvasSink } from './mediabunny.js';
 import { readMedia } from './state.js';
 import { drawTextsAt } from './text.js';
+import { drawTransitionAt } from './transitions.js';
 
 export function draftSize(canvas, maxEdge = 720) {
   const ar = canvas.w / canvas.h;
@@ -96,6 +97,8 @@ export class Preview {
   _overlay() {
     if (!this.project) { this.hitBoxes = []; return; }
     this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
+    // dip/flash sits on top of everything, so titles dip with the picture
+    drawTransitionAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
   }
 
   async _pump() {
@@ -107,7 +110,7 @@ export class Preview {
         if (!t) break;
         try {
           await this._ensure(t.media);
-        } catch (e) { this._paintError('open'); break; }
+        } catch (e) { this._paintError('Media offline'); break; }
         this.tlUs = t.tlUs ?? this.tlUs;
         if (this.cur.kind === 'color') {
           this.clear(this.cur.color);

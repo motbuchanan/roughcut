@@ -19,6 +19,7 @@ import {
 import { readMedia, usToS, US } from './state.js';
 import { mainTrack, clipDurUs, normalize } from './timeline.js';
 import { drawTextsAt } from './text.js';
+import { drawTransitionAt } from './transitions.js';
 import { renderTimelineAudio } from './audio.js';
 
 export async function canExport() {
@@ -113,7 +114,10 @@ export function exportProject(project, opts = {}) {
     const frameTimesUs = [];
     for (let i = 0; i < totalFrames; i++) frameTimesUs.push(Math.min(i * dtUs, total - 1));
 
-    const paintOverlays = (i) => drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
+    const paintOverlays = (i) => {
+      drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
+      drawTransitionAt(ctx, W, H, project, frameTimesUs[i]);
+    };
     // Encoder pipeline with a SMALL window. CanvasSource.add snapshots the canvas
     // synchronously and returns a promise that resolves once the frame drains through
     // the encoder+muxer. Mediabunny's encoder already self-caps its internal queue at
@@ -140,7 +144,12 @@ export function exportProject(project, opts = {}) {
       const m = project.media.find((x) => x.id === clip.mediaId);
 
       if (m && m.kind === 'video') {
-        const f = await readMedia(project.id, m.opfs);
+        let f = null;
+        try { f = await readMedia(project.id, m.opfs); }
+        catch (_) { /* media offline: fill bg + overlays for this clip and continue */
+          for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+          continue;
+        }
         const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
         try {
           const vtrack = await input.getPrimaryVideoTrack();
@@ -172,9 +181,8 @@ export function exportProject(project, opts = {}) {
           }
         } finally { try { input.dispose(); } catch (_) {} }
       } else if (m && m.kind === 'image') {
-        const f = await readMedia(project.id, m.opfs);
-        let bmp = null;
-        try { bmp = await createImageBitmap(f); } catch (_) {}
+        let f = null, bmp = null;
+        try { f = await readMedia(project.id, m.opfs); bmp = await createImageBitmap(f); } catch (_) { bmp = null; }
         try {
           for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); if (bmp) drawContain(ctx, bmp, bmp.width, bmp.height, W, H); paintOverlays(i); await emit(i); }
         } finally { if (bmp) bmp.close?.(); }

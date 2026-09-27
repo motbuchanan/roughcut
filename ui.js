@@ -4,15 +4,16 @@
 
 import {
   listProjects, createProject, loadProject, renameProject, deleteProject,
-  readThumb, scheduleSave, flushSave, CANVAS_PRESETS, loadPrefs, savePrefs,
+  readThumb, scheduleSave, flushSave, CANVAS_PRESETS, loadPrefs, savePrefs, storageEstimate,
 } from './state.js';
 import { importFile } from './media.js';
 import { Preview } from './preview.js';
 import {
   CommandBus, addClipCmd, addAudioCmd, setClipAudioCmd, detachAudioCmd, findClip, laneOf, clipDurUs,
-  makeColorMedia, insertClipCmd, clipIndexAt,
+  makeColorMedia, insertClipCmd, clipIndexAt, setClipTransitionCmd,
   TimelineView, sourceSecAt, mainTrack, normalize, totalUs, fmtTime,
 } from './timeline.js';
+import { TRANSITIONS, TRANS_DURS, makeTransition, canHaveTransIn } from './transitions.js';
 import {
   makeText, addTextCmd, setTextCmd, duplicateTextCmd, textTrack, textDurUs,
   FONTS, SIZES, COLORS, TEXT_DEFAULT_US,
@@ -73,6 +74,20 @@ export function renderList() {
     card.querySelector('.proj-name').textContent = meta.name;
     wrap.appendChild(card);
   }
+  renderStorageMeter();
+}
+async function renderStorageMeter() {
+  const el = els.storageMeter; if (!el) return;
+  try {
+    const { usage, quota } = await storageEstimate();
+    if (!quota) { el.hidden = true; return; }
+    const mb = (n) => n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB';
+    const pct = Math.min(100, Math.round((usage / quota) * 100));
+    els.smFill.style.width = pct + '%';
+    els.smFill.style.background = pct >= 90 ? 'var(--danger)' : 'var(--accent)';
+    els.smText.textContent = `Storage: ${mb(usage)} used of ${mb(quota)} (${pct}%). Delete projects to free space.`;
+    el.hidden = false;
+  } catch (_) { el.hidden = true; }
 }
 async function newProjectFlow() {
   const name = prompt('Project name', 'Untitled'); if (name == null) return;
@@ -138,6 +153,7 @@ async function closeEditor() {
   commitTyping();
   closePull();
   closeExport();
+  closeSettings();
   await flushSave();
   if (previewer) previewer.dispose();
   if (view) view.dispose();
@@ -181,6 +197,38 @@ function renderSheet() {
   els.csTools.classList.toggle('hidden', !canPull);
   els.csDetach.classList.toggle('hidden', lane !== 'v');
   if (!canPull) closePull();
+  renderTransSheet(c);
+}
+
+// ---- transitions (dip / flash at the cut in front of a main-track clip) ----
+let transDurUs = 500_000;   // seeds a newly-added transition; follows the user's last duration pick
+function renderTransSheet(c) {
+  const show = laneOf(current, c.id) === 'v' && canHaveTransIn(current, c.id);
+  els.csTrans.classList.toggle('hidden', !show);
+  if (!show) return;
+  const cur = (c.transIn && c.transIn.type) ? c.transIn.type : 'none';
+  [...els.csTransType.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.t === cur)));
+  const active = cur !== 'none';
+  const us = active ? (c.transIn.durUs || transDurUs) : transDurUs;
+  els.csTransDur.textContent = (us / 1e6).toFixed(us % 1e6 ? 1 : 0) + 's';
+  els.csTransDur.disabled = !active;
+}
+function setTransType(type) {
+  const c = selectedClip();
+  if (!c || laneOf(current, c.id) !== 'v' || !canHaveTransIn(current, c.id)) return;
+  if (type === 'none') { bus.do(setClipTransitionCmd(current, c.id, null)); return; }
+  const us = (c.transIn && c.transIn.durUs) ? c.transIn.durUs : transDurUs;
+  bus.do(setClipTransitionCmd(current, c.id, makeTransition(type, us)));
+  toast('Dip added at the cut ◆  scrub across it to preview');
+}
+function cycleTransDur() {
+  const c = selectedClip();
+  if (!c || !c.transIn || c.transIn.type === 'none') return;
+  const durs = TRANS_DURS.map((d) => d.us);
+  const i = durs.indexOf(c.transIn.durUs);
+  const next = durs[(i + 1) % durs.length];
+  transDurUs = next;
+  bus.do(setClipTransitionCmd(current, c.id, makeTransition(c.transIn.type, next)));
 }
 
 // ---- text (M4) ----------------------------------------------------------
@@ -553,6 +601,41 @@ async function onFilesPicked(fileList) {
   toast(`Imported ${files.length} file${files.length === 1 ? '' : 's'} \u2014 tap to add to timeline`);
 }
 
+// ---- project settings (M6): aspect + background ---------------------------
+const SET_BG = ['#000000', '#ffffff', '#0b1a20', '#4cf0e0', '#f59847', '#7be495'];
+function openSettings() {
+  if (!current) return;
+  pausePlay(); commitTyping();
+  if (!els.setBg.childElementCount) els.setBg.innerHTML = SET_BG.map((c) => `<button class="swatch" data-c="${c}" style="background:${c}" aria-label="${c}"></button>`).join('');
+  renderSettings();
+  els.settingsOverlay.classList.remove('hidden');
+}
+function closeSettings() { els.settingsOverlay.classList.add('hidden'); }
+function renderSettings() {
+  const cur = current.canvas;
+  const keys = Object.keys(CANVAS_PRESETS);
+  [...els.setAspect.children].forEach((b) => {
+    const p = CANVAS_PRESETS[b.dataset.k];
+    b.setAttribute('aria-pressed', String(!!p && p.w === cur.w && p.h === cur.h));
+  });
+  els.setBg.querySelectorAll('.swatch').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.c || '').toLowerCase() === (cur.bg || '#000000').toLowerCase())));
+  els.setSummary.textContent = `${cur.w}\u00d7${cur.h}`;
+}
+function applyCanvas() {
+  previewer.sizeToProject(current);
+  els.canvasBadge.textContent = `${current.canvas.w}\u00d7${current.canvas.h}`;
+  refreshPreview();
+  scheduleSave(current);
+  renderSettings();
+}
+function setAspect(k) {
+  const p = CANVAS_PRESETS[k]; if (!p) return;
+  current.canvas.w = p.w; current.canvas.h = p.h;
+  const prefs = loadPrefs(); prefs.lastCanvas = k; savePrefs(prefs);
+  applyCanvas();
+}
+function setBg(hex) { current.canvas.bg = hex; applyCanvas(); }
+
 // ---- export (M5) ---------------------------------------------------------
 // Default to 720p (scale 0.6667 of a 1080-wide project): full 1080p in-browser
 // export holds the whole MP4 in memory and can exhaust a phone tab on longer clips.
@@ -587,6 +670,7 @@ function closeExport() {
   els.exPlayer.removeAttribute('src');
   exp.blob = null;
   els.exportOverlay.classList.add('hidden');
+  try { navigator.storage.getDirectory().then((r) => r.removeEntry('roughcut-export.tmp.mp4').catch(() => {})); } catch (_) {}
 }
 async function runExport() {
   showExportPane('progress');
@@ -639,6 +723,7 @@ export function initUI() {
   els = {
     toast: $('#toast'),
     projectList: $('#project-list'), emptyList: $('#empty-list'), newBtn: $('#new-project'),
+    storageMeter: $('#storage-meter'), smFill: $('#sm-fill'), smText: $('#sm-text'),
     capReasons: $('#cap-reasons'),
     editorTitle: $('#editor-title'), canvasBadge: $('#canvas-badge'), backBtn: $('#editor-back'),
     preview: $('#preview'), previewHint: $('#preview-hint'),
@@ -652,6 +737,7 @@ export function initUI() {
     sheet: $('#clip-sheet'), csName: $('#cs-name'), csVol: $('#cs-vol'), csVolVal: $('#cs-vol-val'),
     csMute: $('#cs-mute'), csFadeIn: $('#cs-fadein'), csFadeOut: $('#cs-fadeout'),
     csTools: $('#cs-tools'), csDetach: $('#cs-detach'), csPull: $('#cs-pull'),
+    csTrans: $('#cs-trans'), csTransType: $('#cs-trans-type'), csTransDur: $('#cs-trans-dur'),
     pullSheet: $('#pull-sheet'), pullClose: $('#pull-close'), pullChips: $('#pull-chips'), pullName: $('#pull-name'),
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
@@ -664,11 +750,14 @@ export function initUI() {
     exRes: $('#ex-res'), exFps: $('#ex-fps'), exQuality: $('#ex-quality'), exSummary: $('#ex-summary'),
     exportRun: $('#export-run'), exBar: $('#ex-bar'), exStatus: $('#ex-status'), exportCancel: $('#export-cancel'),
     exPlayer: $('#ex-player'), exDone: $('#ex-done'), exSave: $('#ex-save'), exShare: $('#ex-share'), exAgain: $('#ex-again'),
+    settingsBtn: $('#settings-btn'), settingsOverlay: $('#settings-overlay'), settingsClose: $('#settings-close'), settingsDone: $('#settings-done'),
+    setAspect: $('#set-aspect'), setBg: $('#set-bg'), setSummary: $('#set-summary'),
   };
   // build segmented controls + swatches once
   els.tsSize.innerHTML = SIZES.map((s) => `<button data-v="${s.v}">${s.label}</button>`).join('');
   els.tsFont.innerHTML = FONTS.map((f) => `<button data-v="${f.id}" style="font-family:${f.css}">${f.label}</button>`).join('');
   els.tsColors.innerHTML = COLORS.map((c) => `<button class="swatch" data-color="${c}" style="background:${c}" aria-label="${c}"></button>`).join('');
+  els.csTransType.innerHTML = TRANSITIONS.map((t) => `<button data-t="${t.id}" aria-pressed="false">${t.label}</button>`).join('');
 
   els.newBtn.addEventListener('click', newProjectFlow);
   els.projectList.addEventListener('click', onListClick);
@@ -694,6 +783,8 @@ export function initUI() {
   els.csFadeOut.addEventListener('click', () => cycleFade('fadeOutUs'));
   els.csDetach.addEventListener('click', detachAudio);
   els.csPull.addEventListener('click', openPull);
+  els.csTransType.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTransType(b.dataset.t); });
+  els.csTransDur.addEventListener('click', cycleTransDur);
   els.pullClose.addEventListener('click', closePull);
   els.pullChips.addEventListener('click', (e) => {
     const c = e.target.closest('.chip'); if (!c || c.disabled) return;
@@ -731,6 +822,11 @@ export function initUI() {
   els.exSave.addEventListener('click', saveExport);
   els.exShare.addEventListener('click', shareExport);
   els.exAgain.addEventListener('click', () => { showExportPane('setup'); exportSummary(); });
+  els.settingsBtn.addEventListener('click', openSettings);
+  els.settingsClose.addEventListener('click', closeSettings);
+  els.settingsDone.addEventListener('click', closeSettings);
+  els.setAspect.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setAspect(b.dataset.k); });
+  els.setBg.addEventListener('click', (e) => { const b = e.target.closest('.swatch'); if (b) setBg(b.dataset.c); });
   els.tpStart.addEventListener('click', () => { pausePlay(); view.setPlayhead(0); });
   els.tpEnd.addEventListener('click', () => { pausePlay(); view.setPlayhead(totalUs(current)); });
 

@@ -169,6 +169,25 @@ export function setClipAudioCmd(project, clipId, props) {
   };
 }
 
+// Set (or clear, with a falsy/none transition) the transition-in on a main-track
+// clip. transIn is what plays across the cut in front of this clip.
+export function setClipTransitionCmd(project, clipId, trans) {
+  let old = null, had = false;
+  return {
+    label: 'Transition',
+    do() {
+      const c = findClip(project, clipId); if (!c) return;
+      had = 'transIn' in c; old = c.transIn ? { ...c.transIn } : null;
+      if (!trans || trans.type === 'none') delete c.transIn;
+      else c.transIn = { ...trans };
+    },
+    undo() {
+      const c = findClip(project, clipId); if (!c) return;
+      if (had) c.transIn = old; else delete c.transIn;
+    },
+  };
+}
+
 export function addClipCmd(project, media) {
   const t = mainTrack(project);
   const clip = makeClip(media);
@@ -440,14 +459,16 @@ export class TimelineView {
     const t = mainTrack(this.project);
     const total = normalize(this.project);
     this.trackEl.style.width = (this._padPx * 2 + this._usToPx(total)) + 'px';
-    for (const c of t.clips) {
-      const el = this._els.get(c.id); if (!el) continue;
+    t.clips.forEach((c, i) => {
+      const el = this._els.get(c.id); if (!el) return;
       el.style.left = this._tlX(c.tlStartUs) + 'px';
       el.style.width = Math.max(8, this._usToPx(clipDurUs(c))) + 'px';
       el.classList.toggle('selected', c.id === this.selectedId);
       el.querySelector('.tl-clip-label').textContent = fmtTime(clipDurUs(c));
       el.classList.toggle('muted', !!c.muted);
-    }
+      // teal diamond at the front cut when this clip has a transition-in
+      el.classList.toggle('has-trans', i > 0 && !!(c.transIn && c.transIn.type && c.transIn.type !== 'none'));
+    });
     const a = audioTrack(this.project);
     let lane = this.trackEl.querySelector('.tl-alane');
     if (!lane) { lane = document.createElement('div'); lane.className = 'tl-alane'; this.trackEl.prepend(lane); }
