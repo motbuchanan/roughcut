@@ -1,7 +1,7 @@
 // export.js · RoughCut (M5)
 // Renders the whole timeline to an H.264 + AAC MP4, entirely on-device, using
 // Mediabunny's CanvasSource (video) and AudioBufferSource (audio) feeding one
-// Output/BufferTarget. The frame compositor reuses the SAME text draw routine as
+// Output streamed to disk. The frame compositor reuses the SAME text draw routine as
 // the preview, so the export matches what was on screen.
 //
 // Pipeline (spec section 8):
@@ -12,7 +12,7 @@
 //  - close/dispose every sink at the end.
 
 import {
-  Input, BlobSource, ALL_FORMATS, Output, BufferTarget,
+  Input, BlobSource, ALL_FORMATS, Output, StreamTarget,
   Mp4OutputFormat, CanvasSink, CanvasSource, AudioBufferSource,
   canEncodeVideo, canEncodeAudio, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
@@ -57,8 +57,20 @@ export function exportProject(project, opts = {}) {
     const canvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(W, H) : Object.assign(document.createElement('canvas'), { width: W, height: H });
     const ctx = canvas.getContext('2d', { alpha: false });
 
-    const target = new BufferTarget();
-    output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target });
+    // Stream the encoded MP4 straight to an OPFS file instead of holding it in
+    // memory. A BufferTarget grows the whole file in RAM and, with fastStart
+    // 'in-memory' buffering a second copy, ran a phone tab out of memory partway
+    // through (crashes climbed 30%->47%->80% as other memory was trimmed).
+    // StreamTarget over an OPFS writable keeps peak memory flat, so any length or
+    // resolution completes. fastStart:false writes the index at the end (no second
+    // in-memory copy); a locally saved file still plays and uploads fine.
+    const opfsRoot = await navigator.storage.getDirectory();
+    const tmpName = 'roughcut-export.tmp.mp4';
+    try { await opfsRoot.removeEntry(tmpName); } catch (_) {}
+    const fileHandle = await opfsRoot.getFileHandle(tmpName, { create: true });
+    const writable = await fileHandle.createWritable();
+    const target = new StreamTarget(writable);
+    output = new Output({ format: new Mp4OutputFormat({ fastStart: false }), target });
     const videoSource = new CanvasSource(canvas, { codec: 'avc', bitrate: quality });
     output.addVideoTrack(videoSource, { frameRate: fps });
 
@@ -165,15 +177,22 @@ export function exportProject(project, opts = {}) {
     while (gi < totalFrames) { const i = gi++; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
     await Promise.all(inflight);   // drain the encoder queue before finalizing
     onProgress(0.98);
-    await output.finalize();
+    await output.finalize();       // flushes + closes the OPFS writable
     if (cancelled) throw cancelErr();
     onProgress(1);
-    return { blob: new Blob([target.buffer], { type: 'video/mp4' }), ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps };
+    // Disk-backed File; the browser streams it for preview/save/share rather than
+    // holding it all in memory.
+    const blob = await fileHandle.getFile();
+    return { blob, ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps };
   })();
 
   return {
     promise,
-    cancel() { cancelled = true; if (output) { try { output.cancel(); } catch (_) {} } },
+    async cancel() {
+      cancelled = true;
+      if (output) { try { await output.cancel(); } catch (_) {} }
+      try { const r = await navigator.storage.getDirectory(); await r.removeEntry('roughcut-export.tmp.mp4'); } catch (_) {}
+    },
   };
 }
 
