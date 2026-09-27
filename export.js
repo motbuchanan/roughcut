@@ -102,12 +102,14 @@ export function exportProject(project, opts = {}) {
     for (let i = 0; i < totalFrames; i++) frameTimesUs.push(Math.min(i * dtUs, total - 1));
 
     const paintOverlays = (i) => drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
-    // Encoder pipeline: CanvasSource.add snapshots the canvas synchronously and
-    // returns a promise that resolves once the encoder accepts the frame. We keep
-    // up to MAX_INFLIGHT of those promises outstanding so the phone encodes frame N
-    // while we composite N+1, instead of stalling on each frame. Awaiting the oldest
-    // when the queue is full gives natural backpressure.
-    const MAX_INFLIGHT = 6;
+    // Encoder pipeline with a SMALL window. CanvasSource.add snapshots the canvas
+    // synchronously and returns a promise that resolves once the frame drains through
+    // the encoder+muxer. Mediabunny's encoder already self-caps its internal queue at
+    // 4 frames, so a window bigger than that (v0.13 used 6) only piled up unencoded
+    // 1080p frames (~8MB each) plus let the decoder read ahead, until the phone tab
+    // ran out of memory around 30%. Holding the window at 2 keeps the encoder busy
+    // (near the v0.13 speed) while capping peak memory close to the old serial path.
+    const MAX_INFLIGHT = 2;
     const inflight = [];
     const emit = async (i) => {
       const p = videoSource.add(i / fps, frameDur);
