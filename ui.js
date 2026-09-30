@@ -99,7 +99,13 @@ async function newProjectFlow() {
 }
 async function onListClick(e) {
   const openBtn = e.target.closest('.proj-open');
-  if (openBtn) { await openEditor(openBtn.dataset.id); return; }
+  if (openBtn) {
+    // Never let a failed open be a silent dead tap: surface it so the user (and we)
+    // can see why instead of nothing happening.
+    try { await openEditor(openBtn.dataset.id); }
+    catch (err) { console.error('open project failed', err); toast('Could not open project: ' + (err?.message || err), 4000); }
+    return;
+  }
   const actBtn = e.target.closest('[data-act]'); if (!actBtn) return;
   const id = actBtn.dataset.id;
   if (actBtn.dataset.act === 'rename') {

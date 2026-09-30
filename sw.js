@@ -1,7 +1,7 @@
 // sw.js · RoughCut
 // App-shell precache. Bump CACHE on every deploy to match the version badge.
 // Media lives in OPFS (not fetched), so it is never cached here.
-const CACHE = 'roughcut-v24';
+const CACHE = 'roughcut-v25';
 
 const CORE = [
   './',
@@ -48,25 +48,27 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;
 
-  // Navigations: serve cached shell, fall back to network, then index.
+  // IMPORTANT: only ever serve from the CURRENT version's cache (caches.open(CACHE)),
+  // never caches.match(req) which searches EVERY cache and can hand back a file from an
+  // older version. Serving a v21 module next to v24 modules is what made a half-updated
+  // app throw on "open project" while trivial actions still worked. With current-cache-
+  // only + the activate-time purge of old caches, cross-version file mixing can't happen.
   if (req.mode === 'navigate') {
     e.respondWith(
-      caches.match('index.html').then((cached) => cached || fetch(req).catch(() => caches.match('index.html')))
+      caches.open(CACHE).then((c) => c.match('index.html')).then(
+        (cached) => cached || fetch(req).catch(() => caches.open(CACHE).then((c) => c.match('index.html')))
+      )
     );
     return;
   }
 
-  // Everything else: cache-first, fill cache on miss.
   e.respondWith(
-    caches.match(req).then((cached) => {
+    caches.open(CACHE).then((c) => c.match(req).then((cached) => {
       if (cached) return cached;
       return fetch(req).then((res) => {
-        if (res && res.ok && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        }
+        if (res && res.ok && res.type === 'basic') c.put(req, res.clone()).catch(() => {});
         return res;
       });
-    })
+    }))
   );
 });

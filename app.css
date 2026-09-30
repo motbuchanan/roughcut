@@ -97,6 +97,12 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 /* ---- editor screen ---- */
 #screen-editor { display: none; }
 #screen-editor.active { display: flex; }
+/* When the viewport is short (embedded in the site's phone frame, or a small phone
+   in landscape), let the editor scroll vertically so the timeline, Media and Import
+   are always reachable instead of falling off the bottom. The section rows below are
+   all flex:0 0 auto, and the stage keeps a minimum height, so a squeezed layout
+   overflows into a scroll rather than collapsing the preview. */
+#screen-editor.active { overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .editbar {
   display: flex; align-items: center; gap: 10px; padding: 8px 12px;
   background: var(--panel); border-bottom: 1px solid var(--line); flex: 0 0 auto;
@@ -105,9 +111,10 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .editbar .cbadge { margin-left: auto; color: var(--muted); font-size: 12px; }
 
 .stage {
-  flex: 1 1 auto; min-height: 0; position: relative;
+  flex: 1 1 auto; position: relative;
   display: flex; align-items: center; justify-content: center;
   background: #0d0f13; padding: 12px; overflow: hidden;
+  min-height: 40vh;   /* never collapse the preview to nothing when the column is squeezed */
 }
 #preview {
   display: block; max-width: 100%; max-height: 100%; width: auto; height: auto;
