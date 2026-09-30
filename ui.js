@@ -13,7 +13,8 @@ import {
   makeColorMedia, insertClipCmd, clipIndexAt, setClipTransitionCmd,
   TimelineView, sourceSecAt, mainTrack, normalize, totalUs, fmtTime,
 } from './timeline.js';
-import { TRANSITIONS, TRANS_DURS, makeTransition, canHaveTransIn } from './transitions.js';
+import { TRANSITIONS, TRANS_DURS, TRANS_DIRS, DIR_GLYPH, makeTransition, canHaveTransIn, transitionAt, hasDirs, clampSrc } from './transitions.js';
+import { usToS } from './state.js';
 import {
   makeText, addTextCmd, setTextCmd, duplicateTextCmd, textTrack, textDurUs,
   FONTS, SIZES, COLORS, TEXT_DEFAULT_US,
@@ -212,14 +213,19 @@ function renderTransSheet(c) {
   const us = active ? (c.transIn.durUs || transDurUs) : transDurUs;
   els.csTransDur.textContent = (us / 1e6).toFixed(us % 1e6 ? 1 : 0) + 's';
   els.csTransDur.disabled = !active;
+  const dirs = active && hasDirs(cur);
+  els.csTransDir.classList.toggle('hidden', !dirs);
+  if (dirs) els.csTransDir.textContent = DIR_GLYPH[c.transIn.dir || 'L'];
 }
 function setTransType(type) {
   const c = selectedClip();
   if (!c || laneOf(current, c.id) !== 'v' || !canHaveTransIn(current, c.id)) return;
   if (type === 'none') { bus.do(setClipTransitionCmd(current, c.id, null)); return; }
   const us = (c.transIn && c.transIn.durUs) ? c.transIn.durUs : transDurUs;
-  bus.do(setClipTransitionCmd(current, c.id, makeTransition(type, us)));
-  toast('Dip added at the cut ◆  scrub across it to preview');
+  const dir = (c.transIn && c.transIn.dir) || 'L';
+  bus.do(setClipTransitionCmd(current, c.id, makeTransition(type, us, dir)));
+  // park the playhead on the cut so the transition shows in the preview right away
+  view.setPlayhead(c.tlStartUs);
 }
 function cycleTransDur() {
   const c = selectedClip();
@@ -228,7 +234,15 @@ function cycleTransDur() {
   const i = durs.indexOf(c.transIn.durUs);
   const next = durs[(i + 1) % durs.length];
   transDurUs = next;
-  bus.do(setClipTransitionCmd(current, c.id, makeTransition(c.transIn.type, next)));
+  bus.do(setClipTransitionCmd(current, c.id, makeTransition(c.transIn.type, next, c.transIn.dir)));
+}
+function cycleTransDir() {
+  const c = selectedClip();
+  if (!c || !c.transIn || !hasDirs(c.transIn.type)) return;
+  const i = TRANS_DIRS.indexOf(c.transIn.dir || 'L');
+  const next = TRANS_DIRS[(i + 1) % TRANS_DIRS.length];
+  bus.do(setClipTransitionCmd(current, c.id, makeTransition(c.transIn.type, c.transIn.durUs, next)));
+  view.setPlayhead(c.tlStartUs);
 }
 
 // ---- text (M4) ----------------------------------------------------------
@@ -489,6 +503,16 @@ function refreshPreview() {
   const { clip, sourceSec } = sourceSecAt(current, view.playheadUs);
   if (!clip) { previewer.renderAt(current, null, 0, view.playheadUs); els.previewHint.style.display = 'flex'; return; }
   els.previewHint.style.display = 'none';
+  // inside a crossfade/slide/wipe/zoom window: both clips, blended live
+  const tr = transitionAt(current, view.playheadUs);
+  if (tr) {
+    const mA = current.media.find((m) => m.id === tr.a.mediaId) || null;
+    const mB = current.media.find((m) => m.id === tr.b.mediaId) || null;
+    if (mA && mB) {
+      previewer.renderTransition(current, mA, usToS(clampSrc(tr.srcA, mA)), mB, usToS(clampSrc(tr.srcB, mB)), tr, view.playheadUs);
+      return;
+    }
+  }
   const media = current.media.find((m) => m.id === clip.mediaId) || null;
   previewer.renderAt(current, media, sourceSec, view.playheadUs);
 }
@@ -737,7 +761,7 @@ export function initUI() {
     sheet: $('#clip-sheet'), csName: $('#cs-name'), csVol: $('#cs-vol'), csVolVal: $('#cs-vol-val'),
     csMute: $('#cs-mute'), csFadeIn: $('#cs-fadein'), csFadeOut: $('#cs-fadeout'),
     csTools: $('#cs-tools'), csDetach: $('#cs-detach'), csPull: $('#cs-pull'),
-    csTrans: $('#cs-trans'), csTransType: $('#cs-trans-type'), csTransDur: $('#cs-trans-dur'),
+    csTrans: $('#cs-trans'), csTransType: $('#cs-trans-type'), csTransDur: $('#cs-trans-dur'), csTransDir: $('#cs-trans-dir'),
     pullSheet: $('#pull-sheet'), pullClose: $('#pull-close'), pullChips: $('#pull-chips'), pullName: $('#pull-name'),
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
@@ -785,6 +809,7 @@ export function initUI() {
   els.csPull.addEventListener('click', openPull);
   els.csTransType.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTransType(b.dataset.t); });
   els.csTransDur.addEventListener('click', cycleTransDur);
+  els.csTransDir.addEventListener('click', cycleTransDir);
   els.pullClose.addEventListener('click', closePull);
   els.pullChips.addEventListener('click', (e) => {
     const c = e.target.closest('.chip'); if (!c || c.disabled) return;

@@ -1,7 +1,7 @@
 // sw.js · RoughCut
 // App-shell precache. Bump CACHE on every deploy to match the version badge.
 // Media lives in OPFS (not fetched), so it is never cached here.
-const CACHE = 'roughcut-v21';
+const CACHE = 'roughcut-v24';
 
 const CORE = [
   './',
@@ -21,6 +21,7 @@ const CORE = [
   'transitions.js',
   'export.js',
   'mediabunny.js',
+  'creepster.woff2',
   'icon-192.png',
   'icon-512.png',
   'icon-maskable-512.png',

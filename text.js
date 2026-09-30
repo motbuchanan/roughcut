@@ -14,7 +14,25 @@ export const FONTS = [
   { id: 'serif', label: 'Serif', css: 'Georgia, "Times New Roman", serif' },
   { id: 'mono',  label: 'Mono',  css: 'ui-monospace, "Roboto Mono", Menlo, monospace' },
   { id: 'hand',  label: 'Hand',  css: '"Dancing Script", "Segoe Script", cursive' },
+  // Bundled display font (creepster.woff2, SIL OFL). Single weight, so it ignores bold.
+  { id: 'spook', label: 'Spooky', css: '"Creepster", system-ui, cursive', fixedWeight: '400', bundled: 'Creepster' },
 ];
+
+// Load any bundled webfonts before drawing, so the preview and the export both
+// render them instead of silently falling back to a system font. Idempotent.
+let _fontsReady = null;
+export function ensureFonts() {
+  if (_fontsReady) return _fontsReady;
+  const bundled = FONTS.filter((f) => f.bundled).map((f) => f.bundled);
+  if (typeof document === 'undefined' || !document.fonts || !bundled.length) {
+    _fontsReady = Promise.resolve();
+    return _fontsReady;
+  }
+  _fontsReady = Promise.all(
+    bundled.map((fam) => document.fonts.load(`400 64px "${fam}"`).catch(() => {}))
+  ).then(() => {});
+  return _fontsReady;
+}
 export const SIZES = [
   { id: 's',  label: 'S',  v: 0.035 },
   { id: 'm',  label: 'M',  v: 0.05 },
@@ -100,7 +118,8 @@ export function duplicateTextCmd(project, id) {
 export function fontCss(item, H) {
   const f = FONTS.find((x) => x.id === item.font) || FONTS[0];
   const px = Math.max(8, Math.round(item.size * H));
-  return { font: `${item.bold ? '700' : '400'} ${px}px ${f.css}`, px };
+  const weight = f.fixedWeight || (item.bold ? '700' : '400');
+  return { font: `${weight} ${px}px ${f.css}`, px };
 }
 
 // Layout: returns { lines, px, lineH, blockW, blockH, left, top, padX, padY } in canvas px.

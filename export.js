@@ -1,14 +1,16 @@
-// export.js · RoughCut (M5)
+// export.js · RoughCut (M5, transitions v0.24)
 // Renders the whole timeline to an H.264 + AAC MP4, entirely on-device, using
 // Mediabunny's CanvasSource (video) and AudioBufferSource (audio) feeding one
-// Output streamed to disk. The frame compositor reuses the SAME text draw routine as
-// the preview, so the export matches what was on screen.
+// Output streamed to disk. The frame compositor reuses the SAME text, dip and
+// transition draw routines as the preview, so the export matches what was on screen.
 //
-// Pipeline (spec section 8):
+// Pipeline:
 //  - audio: OfflineAudioContext mix of the whole timeline -> AudioBufferSource
-//  - video: step tUs by 1e6/fps; per frame pull the active clip's frame at the
-//    nearest sample, composite at full canvas res, draw text, add() the canvas.
-//    add() is awaited so the encoder queue provides backpressure.
+//  - video: the output frames are planned into SEGMENTS (transitions.js planFrames):
+//      solo  = one clip on screen, decoded in ONE sequential pass per segment
+//      dual  = a crossfade/slide/wipe/zoom window: both clips decoded in lockstep
+//              and blended per frame
+//    Each frame gets text, then the dip overlay, then goes to the encoder.
 //  - close/dispose every sink at the end.
 
 import {
@@ -17,14 +19,14 @@ import {
   canEncodeVideo, canEncodeAudio, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
 import { readMedia, usToS, US } from './state.js';
-import { mainTrack, clipDurUs, normalize } from './timeline.js';
-import { drawTextsAt } from './text.js';
-import { drawTransitionAt } from './transitions.js';
+import { mainTrack, normalize } from './timeline.js';
+import { drawTextsAt, ensureFonts } from './text.js';
+import { drawTransitionAt, planFrames, drawDualTransition, clampSrc } from './transitions.js';
 import { renderTimelineAudio } from './audio.js';
 
-export async function canExport() {
+export async function canExport(codec = 'avc') {
   const reasons = [];
-  try { if (!(await canEncodeVideo('avc'))) reasons.push('This browser can’t encode H.264 video.'); }
+  try { if (!(await canEncodeVideo(codec))) reasons.push('This browser can’t encode H.264 video.'); }
   catch (e) { reasons.push('H.264 check failed.'); }
   return { ok: reasons.length === 0, reasons };
 }
@@ -34,12 +36,16 @@ function drawContain(ctx, src, sw, sh, W, H) {
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
   ctx.drawImage(src, Math.round((W - dw) / 2), Math.round((H - dh) / 2), dw, dh);
 }
+function makeCanvas(W, H) {
+  return (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(W, H) : Object.assign(document.createElement('canvas'), { width: W, height: H });
+}
 
-// opts: { fps, quality: 'high'|'medium', scale: 1|0.5, onProgress, signal }
+// opts: { fps, quality: 'high'|'medium', scale: 1|0.6667, codec?: 'avc', onProgress, signal }
 export function exportProject(project, opts = {}) {
   const fps = opts.fps || project.canvas.fps || 30;
   const quality = opts.quality === 'medium' ? QUALITY_MEDIUM : QUALITY_HIGH;
   const scale = opts.scale || 1;
+  const codec = opts.codec || 'avc';
   const onProgress = opts.onProgress || (() => {});
   let cancelled = false;
   let output = null;
@@ -47,7 +53,7 @@ export function exportProject(project, opts = {}) {
   const promise = (async () => {
     const total = normalize(project);
     if (total <= 0) throw new Error('Nothing on the timeline to export.');
-    const cap = await canExport();
+    const cap = await canExport(codec);
     if (!cap.ok) throw new Error(cap.reasons.join(' '));
 
     // even dimensions (H.264 requires even width/height)
@@ -55,16 +61,12 @@ export function exportProject(project, opts = {}) {
     const H = Math.max(2, Math.round(project.canvas.h * scale / 2) * 2);
     const bg = project.canvas.bg || '#000000';
 
-    const canvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(W, H) : Object.assign(document.createElement('canvas'), { width: W, height: H });
+    const canvas = makeCanvas(W, H);
     const ctx = canvas.getContext('2d', { alpha: false });
 
     // Stream the encoded MP4 straight to an OPFS file instead of holding it in
-    // memory. A BufferTarget grows the whole file in RAM and, with fastStart
-    // 'in-memory' buffering a second copy, ran a phone tab out of memory partway
-    // through (crashes climbed 30%->47%->80% as other memory was trimmed).
-    // StreamTarget over an OPFS writable keeps peak memory flat, so any length or
-    // resolution completes. fastStart:false writes the index at the end (no second
-    // in-memory copy); a locally saved file still plays and uploads fine.
+    // memory: a BufferTarget ran a phone tab out of memory partway through long
+    // exports. fastStart:false writes the index at the end (no second in-memory copy).
     const opfsRoot = await navigator.storage.getDirectory();
     const tmpName = 'roughcut-export.tmp.mp4';
     try { await opfsRoot.removeEntry(tmpName); } catch (_) {}
@@ -72,7 +74,7 @@ export function exportProject(project, opts = {}) {
     const writable = await fileHandle.createWritable();
     const target = new StreamTarget(writable);
     output = new Output({ format: new Mp4OutputFormat({ fastStart: false }), target });
-    const videoSource = new CanvasSource(canvas, { codec: 'avc', bitrate: quality });
+    const videoSource = new CanvasSource(canvas, { codec, bitrate: quality });
     output.addVideoTrack(videoSource, { frameRate: fps });
 
     // Audio: mix offline first (0..12% of progress), add if present + encodable.
@@ -104,10 +106,10 @@ export function exportProject(project, opts = {}) {
     }
     onProgress(0.12);
 
-    // Video: walk clips in timeline order, decoding each clip's frames in ONE
-    // sequential pass (canvasesAtTimestamps) instead of a precise seek per output
-    // frame. Seeking per frame re-decoded from the nearest keyframe every time,
-    // which was the ~50x slowdown. Sequential reading decodes each source frame once.
+    // Bundled display fonts (Creepster) must be loaded before any text is drawn.
+    await ensureFonts();
+
+    // ---- video ----
     const dtUs = US / fps;
     const frameDur = 1 / fps;
     const totalFrames = Math.max(1, Math.round(usToS(total) * fps));
@@ -118,13 +120,8 @@ export function exportProject(project, opts = {}) {
       drawTextsAt(ctx, W, H, project, frameTimesUs[i]);
       drawTransitionAt(ctx, W, H, project, frameTimesUs[i]);
     };
-    // Encoder pipeline with a SMALL window. CanvasSource.add snapshots the canvas
-    // synchronously and returns a promise that resolves once the frame drains through
-    // the encoder+muxer. Mediabunny's encoder already self-caps its internal queue at
-    // 4 frames, so a window bigger than that (v0.13 used 6) only piled up unencoded
-    // 1080p frames (~8MB each) plus let the decoder read ahead, until the phone tab
-    // ran out of memory around 30%. Holding the window at 2 keeps the encoder busy
-    // (near the v0.13 speed) while capping peak memory close to the old serial path.
+    // Encoder pipeline with a SMALL window: Mediabunny's encoder self-caps its queue
+    // at 4 frames; bigger windows only piled up unencoded frames and OOM'd phones.
     const MAX_INFLIGHT = 2;
     const inflight = [];
     const emit = async (i) => {
@@ -134,72 +131,117 @@ export function exportProject(project, opts = {}) {
       if (i % 4 === 0) onProgress(0.12 + 0.86 * (i / totalFrames));
     };
 
-    let gi = 0; // global output-frame cursor; clips are contiguous so this covers 0..totalFrames-1
-    for (const clip of mainTrack(project).clips) {
-      if (cancelled) throw cancelErr();
-      const cs = clip.tlStartUs, ce = cs + clipDurUs(clip);
-      const idxs = [];
-      while (gi < totalFrames && frameTimesUs[gi] < ce) { idxs.push(gi); gi++; }
-      if (!idxs.length) continue;
-      const m = project.media.find((x) => x.id === clip.mediaId);
+    const clips = mainTrack(project).clips;
+    const mediaOf = (clip) => project.media.find((x) => x.id === clip.mediaId) || null;
 
-      if (m && m.kind === 'video') {
-        let f = null;
-        try { f = await readMedia(project.id, m.opfs); }
-        catch (_) { /* media offline: fill bg + overlays for this clip and continue */
-          for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
-          continue;
-        }
-        const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
-        try {
+    // One frame source per CLIP (not per media: a split clip is the same file twice,
+    // and a dual segment needs two independent readers on it).
+    //   { kind:'video', input, sink } | { kind:'image', bmp } | { kind:'color', color } | { kind:'none' }
+    const sources = new Map();
+    async function sourceFor(ci) {
+      if (sources.has(ci)) return sources.get(ci);
+      const clip = clips[ci], m = mediaOf(clip);
+      let src = { kind: 'none' };
+      try {
+        if (m && m.kind === 'video') {
+          const f = await readMedia(project.id, m.opfs);
+          const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
           const vtrack = await input.getPrimaryVideoTrack();
-          if (vtrack) {
-            const sink = new CanvasSink(vtrack, { width: W, height: H, fit: 'contain', poolSize: 2 });
-            const tss = idxs.map((i) => usToS(clip.inUs) + usToS(frameTimesUs[i] - cs));
-            let k = 0;
-            // A hardware decoder can error on a frame (older phones do this at higher
-            // fps/resolution). Don't throw a multi-minute render away: catch it, hold
-            // the last good frame, and finish. The output keeps full length and length
-            // sync; the tail just repeats the last frame it could decode.
-            try {
-              for await (const wrapped of sink.canvasesAtTimestamps(tss)) {
-                if (cancelled) throw cancelErr();
-                const i = idxs[k++];
-                ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-                if (wrapped && wrapped.canvas) ctx.drawImage(wrapped.canvas, 0, 0, W, H);
-                paintOverlays(i);
-                await emit(i);
-              }
-            } catch (err) {
-              if (err && err.name === 'ExportCanceledError') throw err;
-              console.warn('export: decode fell back at frame', k, 'of', idxs.length, err);
-            }
-            // remaining frames of this clip reuse the last composited canvas as-is
-            while (k < idxs.length) { const i = idxs[k++]; await emit(i); }
-          } else {
-            for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
-          }
-        } finally { try { input.dispose(); } catch (_) {} }
-      } else if (m && m.kind === 'image') {
-        let f = null, bmp = null;
-        try { f = await readMedia(project.id, m.opfs); bmp = await createImageBitmap(f); } catch (_) { bmp = null; }
-        try {
-          for (const i of idxs) { ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); if (bmp) drawContain(ctx, bmp, bmp.width, bmp.height, W, H); paintOverlays(i); await emit(i); }
-        } finally { if (bmp) bmp.close?.(); }
-      } else {
-        const col = (m && m.kind === 'color') ? (m.color || '#000') : bg;
-        for (const i of idxs) { ctx.fillStyle = col; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
-      }
+          if (vtrack) src = { kind: 'video', input, sink: new CanvasSink(vtrack, { width: W, height: H, fit: 'contain', poolSize: 2 }), media: m };
+          else { try { input.dispose(); } catch (_) {} }
+        } else if (m && m.kind === 'image') {
+          const f = await readMedia(project.id, m.opfs);
+          src = { kind: 'image', bmp: await createImageBitmap(f) };
+        } else if (m && m.kind === 'color') {
+          src = { kind: 'color', color: m.color || '#000' };
+        }
+      } catch (_) { src = { kind: 'none' }; }   // media offline -> background only
+      sources.set(ci, src);
+      return src;
     }
-    // any trailing frames with no clip (shouldn't happen with contiguous clips)
-    while (gi < totalFrames) { const i = gi++; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H); paintOverlays(i); await emit(i); }
+    function disposeSource(ci) {
+      const s = sources.get(ci); if (!s) return;
+      if (s.input) { try { s.input.dispose(); } catch (_) {} }
+      if (s.bmp) { try { s.bmp.close?.(); } catch (_) {} }
+      sources.delete(ci);
+    }
+    // Last segment index that touches each clip, so readers close as soon as they're done.
+    const segs = planFrames(project, frameTimesUs);
+    const lastUse = new Map();
+    segs.forEach((s, k) => { if (s.kind === 'solo') lastUse.set(s.ci, k); else { lastUse.set(s.ai, k); lastUse.set(s.bi, k); } });
+
+    // Draw a static (image/color/none) source, or a decoded frame canvas, into a ctx.
+    const paintStatic = (c, src, frame) => {
+      c.fillStyle = (src.kind === 'color') ? src.color : bg; c.fillRect(0, 0, W, H);
+      if (src.kind === 'image' && src.bmp) drawContain(c, src.bmp, src.bmp.width, src.bmp.height, W, H);
+      else if (frame) c.drawImage(frame, 0, 0, W, H);
+    };
+    // Sequential frame iterator for a source over a list of source times (us).
+    // Non-video sources yield null every frame (paintStatic handles them).
+    async function* framesOf(src, srcUsList) {
+      if (src.kind !== 'video') { for (let k = 0; k < srcUsList.length; k++) yield null; return; }
+      const tss = srcUsList.map((us) => usToS(clampSrc(us, src.media)));
+      let k = 0;
+      try {
+        for await (const wrapped of src.sink.canvasesAtTimestamps(tss)) { k++; yield (wrapped && wrapped.canvas) || undefined; }
+      } catch (err) {
+        // A hardware decoder can error on a frame (older phones at higher fps/res).
+        // Don't throw a multi-minute render away: hold the last good frame.
+        if (err && err.name === 'ExportCanceledError') throw err;
+        console.warn('export: decode fell back at frame', k, 'of', tss.length, err);
+      }
+      for (; k < srcUsList.length; k++) yield undefined;   // undefined = "reuse last"
+    }
+
+    const scratchA = makeCanvas(W, H), scratchB = makeCanvas(W, H);
+    const ctxA = scratchA.getContext('2d', { alpha: false }), ctxB = scratchB.getContext('2d', { alpha: false });
+
+    for (let sIdx = 0; sIdx < segs.length; sIdx++) {
+      const seg = segs[sIdx];
+      if (cancelled) throw cancelErr();
+
+      if (seg.kind === 'solo') {
+        const src = seg.ci >= 0 ? await sourceFor(seg.ci) : { kind: 'none' };
+        let last = null;
+        const it = framesOf(src, seg.src);
+        for (let k = 0; k < seg.idx.length; k++) {
+          if (cancelled) throw cancelErr();
+          const i = seg.idx[k];
+          const r = await it.next();
+          const frame = r.value === undefined ? last : r.value;
+          if (frame !== undefined) last = frame;
+          paintStatic(ctx, src, frame);
+          paintOverlays(i);
+          await emit(i);
+        }
+      } else {
+        const srcA = await sourceFor(seg.ai), srcB = await sourceFor(seg.bi);
+        const itA = framesOf(srcA, seg.srcA), itB = framesOf(srcB, seg.srcB);
+        let lastA = null, lastB = null;
+        for (let k = 0; k < seg.idx.length; k++) {
+          if (cancelled) throw cancelErr();
+          const i = seg.idx[k];
+          const [ra, rb] = await Promise.all([itA.next(), itB.next()]);
+          const fa = ra.value === undefined ? lastA : ra.value; if (fa !== undefined) lastA = fa;
+          const fb = rb.value === undefined ? lastB : rb.value; if (fb !== undefined) lastB = fb;
+          paintStatic(ctxA, srcA, fa);
+          paintStatic(ctxB, srcB, fb);
+          drawDualTransition(ctx, W, H, seg.type, seg.dir, seg.xs[k], scratchA, scratchB);
+          paintOverlays(i);
+          await emit(i);
+        }
+      }
+      // close readers whose clips are finished
+      for (const [ci, k] of lastUse) if (k === sIdx) disposeSource(ci);
+    }
+    for (const ci of [...sources.keys()]) disposeSource(ci);
+
     await Promise.all(inflight);   // drain the encoder queue before finalizing
     onProgress(0.98);
     await output.finalize();       // flushes + closes the OPFS writable
     if (cancelled) throw cancelErr();
     onProgress(1);
-    // Disk-backed File; the browser streams it for preview/save/share rather than
-    // holding it all in memory.
+    // Disk-backed File; the browser streams it for preview/save/share.
     const blob = await fileHandle.getFile();
     return { blob, ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps };
   })();
