@@ -16,10 +16,71 @@
 import {
   Input, BlobSource, ALL_FORMATS, Output, StreamTarget,
   Mp4OutputFormat, CanvasSink, CanvasSource, AudioBufferSource,
+  EncodedPacketSink, EncodedAudioPacketSource, EncodedPacket,
   canEncodeVideo, canEncodeAudio, getEncodableAudioCodecs, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
 import { readMedia, usToS, US } from './state.js';
-import { mainTrack, normalize } from './timeline.js';
+import { mainTrack, audioTrack, clipDurUs, normalize } from './timeline.js';
+
+// iOS and macOS Safari share a WebCodecs AAC bug: the ENCODED audio frames are valid,
+// but the AudioEncoder reports a malformed decoder-config description (an esds-wrapped
+// blob instead of the bare 2-byte AudioSpecificConfig). Mediabunny trusts that blob and
+// writes a broken MP4 audio track, so re-encoded exports played silent. On these browsers
+// we encode the mixed audio ourselves and hand Mediabunny a CORRECT, hand-built ASC, which
+// bypasses the one thing Safari gets wrong. Other browsers keep the proven AudioBufferSource.
+const IS_APPLE_WEBKIT = (() => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '', plat = navigator.platform || '', vendor = navigator.vendor || '';
+  const iOS = /iP(hone|ad|od)/.test(ua) || /iP(hone|ad|od)/.test(plat) || (/\bMac/.test(plat) && (navigator.maxTouchPoints || 0) > 1);
+  const safari = /Safari/.test(ua) && !/Chrome|CriOS|Chromium|Edg|Android|FxiOS/.test(ua);
+  return iOS || (safari && /Apple/.test(vendor));
+})();
+
+// Build the 2-byte AAC-LC AudioSpecificConfig for a sample rate + channel count.
+// 5 bits objectType(2=AAC-LC), 4 bits sampleRateIndex, 4 bits channelConfig, 3 bits zero.
+// e.g. 48k mono -> 0x11,0x88 ; 48k stereo -> 0x11,0x90 (matches Chrome's correct output).
+function buildAacAsc(sampleRate, channels) {
+  const FREQ = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+  let idx = FREQ.indexOf(sampleRate); if (idx < 0) idx = 4;   // default 44100
+  const chan = Math.max(1, Math.min(channels, 7));
+  const bits = (2 << 11) | (idx << 7) | (chan << 3);
+  return new Uint8Array([(bits >>> 8) & 0xff, bits & 0xff]);
+}
+
+// Encode a mixed AudioBuffer to AAC with our own AudioEncoder, writing a correct ASC, and
+// feed the packets to an EncodedAudioPacketSource. Used only on Apple WebKit.
+async function encodeMixToAac(src, mix, bitrate, isCancelled) {
+  const sampleRate = mix.sampleRate;
+  const channels = Math.min(mix.numberOfChannels, 2);
+  const decoderConfig = { codec: 'mp4a.40.2', sampleRate, numberOfChannels: channels, description: buildAacAsc(sampleRate, channels) };
+  const chunks = [];
+  let encErr = null;
+  const encoder = new AudioEncoder({
+    output: (chunk) => { const b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); chunks.push({ data: b, ts: chunk.timestamp, dur: chunk.duration, type: chunk.type || 'key' }); },
+    error: (e) => { encErr = e; },
+  });
+  encoder.configure({ codec: 'mp4a.40.2', sampleRate, numberOfChannels: channels, bitrate });
+  const block = sampleRate; // 1s of samples per AudioData
+  for (let off = 0; off < mix.length; off += block) {
+    if (isCancelled()) throw cancelErr();
+    if (encErr) throw encErr;
+    const len = Math.min(block, mix.length - off);
+    const planar = new Float32Array(len * channels);
+    for (let c = 0; c < channels; c++) planar.set(mix.getChannelData(c).subarray(off, off + len), c * len);
+    const ad = new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames: len, numberOfChannels: channels, timestamp: Math.round((off / sampleRate) * 1e6), data: planar });
+    encoder.encode(ad); ad.close();
+  }
+  await encoder.flush();
+  try { encoder.close(); } catch (_) {}
+  if (encErr) throw encErr;
+  if (!chunks.length) throw new Error('no audio chunks produced');
+  let first = true;
+  for (const c of chunks) {
+    if (isCancelled()) throw cancelErr();
+    await src.add(new EncodedPacket(c.data, c.type, c.ts / 1e6, (c.dur || 0) / 1e6), first ? { decoderConfig } : undefined);
+    first = false;
+  }
+}
 import { drawTextsAt, ensureFonts } from './text.js';
 import { drawTransitionAt, planFrames, drawDualTransition, clampSrc } from './transitions.js';
 import { renderTimelineAudio } from './audio.js';
@@ -77,42 +138,155 @@ export function exportProject(project, opts = {}) {
     const videoSource = new CanvasSource(canvas, { codec, bitrate: quality });
     output.addVideoTrack(videoSource, { frameRate: fps });
 
-    // Audio: mix offline first (0..12% of progress), then add it using the best
-    // codec THIS device can actually encode into an MP4. iOS Safari is why this is
-    // defensive: older iOS has no AudioEncoder at all, and some iOS builds encode
-    // AAC but hand back a broken config, so a naive "assume AAC" path exported
-    // silent videos with no explanation. We pick a codec, and ALWAYS record what
-    // happened (audioInfo) so a silent export is never a mystery again.
-    let audioSource = null;
-    const audioInfo = { included: false, codec: null, reason: '', encodable: [] };
-    onProgress(0.02);
-    let mix = null;
-    try { mix = await renderTimelineAudio(project, total, 48000); }
-    catch (e) { console.warn('audio mix failed, exporting silent', e); audioInfo.reason = 'could not mix the audio on this device'; }
-    if (cancelled) throw cancelErr();
-    if (mix) {
-      try { audioInfo.encodable = (await getEncodableAudioCodecs()) || []; } catch (_) {}
-      // MP4-friendly and iOS-playable, in order of preference.
-      let pick = null;
-      for (const c of ['aac', 'mp3', 'alac']) { try { if (await canEncodeAudio(c)) { pick = c; break; } } catch (_) {} }
-      if (pick) {
-        try {
-          audioSource = new AudioBufferSource({ codec: pick, bitrate: quality });
-          output.addAudioTrack(audioSource);
-          audioInfo.included = true; audioInfo.codec = pick;
-        } catch (e) { audioSource = null; audioInfo.included = false; audioInfo.reason = 'the audio encoder would not start (' + (e?.message || e) + ')'; }
-      } else {
-        audioInfo.reason = 'this browser can’t encode audio for MP4' +
-          (audioInfo.encodable.length ? ' (it can encode: ' + audioInfo.encodable.join(', ') + ')' : ' (it reports no audio encoders)');
+    // ---- audio passthrough helpers ----
+    const mediaById = (id) => project.media.find((x) => x.id === id) || null;
+    function descKey(d) {
+      if (!d) return 'none';
+      try { const u = new Uint8Array(d.buffer ? d.buffer : d); return u.length + ':' + Array.from(u.subarray(0, 8)).join(','); }
+      catch (_) { return 'x'; }
+    }
+    function disposeOpened(list) { for (const o of (list || [])) { try { o.input.dispose(); } catch (_) {} } }
+    // Decide whether we can copy source audio instead of re-encoding. Returns a plan or null.
+    async function planPassthrough() {
+      const main = mainTrack(project).clips;
+      if (!main.length) return null;
+      const at = audioTrack(project);
+      const musicAudible = !!(at && at.clips && at.clips.some((c) => { const m = mediaById(c.mediaId); return m && !c.muted && (c.gain ?? 1) > 0; }));
+      if (musicAudible) return null;                       // two lanes -> must mix, so encode
+      const contrib = [];
+      for (const c of main) {
+        const m = mediaById(c.mediaId);
+        if (!m) return null;                               // unknown media -> be safe, encode
+        if (c.muted || !m.hasAudio) continue;              // intentional/absent audio -> silent span, fine
+        if ((c.gain ?? 1) !== 1) return null;              // volume change -> encode
+        if ((c.fadeInUs || 0) > 0 || (c.fadeOutUs || 0) > 0) return null;  // fades -> encode
+        if (m.kind !== 'video' && m.kind !== 'audio') continue;
+        contrib.push({ clip: c, media: m });
       }
-    } else if (!audioInfo.reason) {
-      audioInfo.reason = 'there was no audio on the timeline';
+      if (!contrib.length) return null;                    // nothing copyable -> encode path reports it
+      let codec = null, decoderConfig = null, key = null;
+      const opened = [];
+      try {
+        for (const { clip, media: m } of contrib) {
+          const file = await readMedia(project.id, m.opfs);
+          const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+          const track = await input.getPrimaryAudioTrack();
+          if (!track) { try { input.dispose(); } catch (_) {} disposeOpened(opened); return null; }
+          const [c2, dc] = await Promise.all([track.getCodec(), track.getDecoderConfig()]);
+          if (!c2 || !dc) { try { input.dispose(); } catch (_) {} disposeOpened(opened); return null; }
+          const k = c2 + '|' + dc.sampleRate + '|' + dc.numberOfChannels + '|' + descKey(dc.description);
+          if (codec === null) { codec = c2; decoderConfig = dc; key = k; }
+          else if (k !== key) { try { input.dispose(); } catch (_) {} disposeOpened(opened); return null; }  // mixed configs -> encode
+          opened.push({ clip, input, track });
+        }
+      } catch (e) { disposeOpened(opened); return null; }
+      return { codec, decoderConfig, opened };
+    }
+    // Copy each clip's source audio packets onto the output track, retimed to the timeline.
+    async function feedPassthrough(src, plan) {
+      let first = true, lastTs = -Infinity;
+      for (const { clip, track } of plan.opened) {
+        if (cancelled) throw cancelErr();
+        const sink = new EncodedPacketSink(track);
+        const inSec = usToS(clip.inUs || 0);
+        const endSec = inSec + usToS(clipDurUs(clip));
+        const tlSec = usToS(clip.tlStartUs);
+        let pkt = await sink.getPacket(inSec, {});
+        if (!pkt) pkt = await sink.getFirstPacket({});
+        while (pkt) {
+          if (cancelled) throw cancelErr();
+          if (pkt.timestamp >= endSec) break;
+          if (pkt.timestamp + (pkt.duration || 0) > inSec) {   // packet overlaps the kept range
+            let newTs = (pkt.timestamp - inSec) + tlSec;
+            if (newTs <= lastTs) newTs = lastTs + 1e-6;         // keep timestamps strictly increasing
+            await src.add(pkt.clone({ timestamp: newTs }), first ? { decoderConfig: plan.decoderConfig } : undefined);
+            lastTs = newTs; first = false;
+          }
+          pkt = await sink.getNextPacket(pkt, {});
+        }
+      }
+      if (first) throw new Error('no audio packets were copied');
+    }
+
+    // ===== AUDIO =====
+    // Preferred path: COPY the source clips' own encoded audio with NO re-encoding
+    // (passthrough). This is the iOS Safari fix: Safari's AAC encoder writes a broken
+    // track header, so re-encoded exports played silent. Copying uses the source file's
+    // valid config and original packets, so the audio plays everywhere and needs no
+    // AudioEncoder at all. We can only copy when the timeline audio is "simple": one
+    // lane, full volume, no fades, and all source clips share one audio config.
+    // Anything else (music overlay, volume, fades, mixed configs) falls back to the
+    // mix + encode path, which still works on Android. Passthrough fails SAFE: any
+    // error drops to the encode path, so the worst case is exactly the old behavior.
+    let audioSource = null;      // AudioBufferSource (encode path)
+    let audioPacket = null;      // EncodedAudioPacketSource (copy path, or self-encode on Apple)
+    let selfEncodeAac = false;   // Apple WebKit: encode the mix ourselves with a correct header
+    let ptPlan = null;
+    let mix = null;
+    const aacBitrate = (opts.quality === 'medium') ? 96000 : 160000;
+    const audioInfo = { included: false, codec: null, mode: 'none', reason: '', encodable: [] };
+    onProgress(0.02);
+
+    try { ptPlan = await planPassthrough(); } catch (e) { console.warn('passthrough plan failed', e); ptPlan = null; }
+    if (ptPlan) {
+      try {
+        audioPacket = new EncodedAudioPacketSource(ptPlan.codec);
+        output.addAudioTrack(audioPacket);
+        audioInfo.included = true; audioInfo.codec = ptPlan.codec; audioInfo.mode = 'copy';
+      } catch (e) { console.warn('passthrough add failed, will encode', e); audioPacket = null; disposeOpened(ptPlan.opened); ptPlan = null; }
+    }
+    if (!ptPlan) {
+      try { mix = await renderTimelineAudio(project, total, 48000); }
+      catch (e) { console.warn('audio mix failed, exporting silent', e); audioInfo.reason = 'could not mix the audio on this device'; }
+      if (cancelled) throw cancelErr();
+      if (mix) {
+        try { audioInfo.encodable = (await getEncodableAudioCodecs()) || []; } catch (_) {}
+        let pick = null;
+        for (const c of ['aac', 'mp3', 'alac']) { try { if (await canEncodeAudio(c)) { pick = c; break; } } catch (_) {} }
+        if (pick) {
+          if (pick === 'aac' && IS_APPLE_WEBKIT) {
+            // Apple WebKit: encode AAC ourselves and write a correct ASC (the Safari fix).
+            try {
+              audioPacket = new EncodedAudioPacketSource('aac');
+              output.addAudioTrack(audioPacket);
+              selfEncodeAac = true; audioInfo.included = true; audioInfo.codec = 'aac'; audioInfo.mode = 'encode-fix';
+            } catch (e) { audioPacket = null; selfEncodeAac = false; }
+          }
+          if (!selfEncodeAac) {
+            try {
+              audioSource = new AudioBufferSource({ codec: pick, bitrate: quality });
+              output.addAudioTrack(audioSource);
+              audioInfo.included = true; audioInfo.codec = pick; audioInfo.mode = 'encode';
+            } catch (e) { audioSource = null; audioInfo.included = false; audioInfo.reason = 'the audio encoder would not start (' + (e?.message || e) + ')'; }
+          }
+        } else {
+          audioInfo.reason = 'this browser can’t encode audio for MP4' +
+            (audioInfo.encodable.length ? ' (it can encode: ' + audioInfo.encodable.join(', ') + ')' : ' (it reports no audio encoders)');
+        }
+      } else if (!audioInfo.reason) {
+        audioInfo.reason = 'there was no audio on the timeline';
+      }
     }
 
     await output.start();
 
-    // feed audio in <=10s chunks so the encoder queue stays bounded
-    if (audioSource && mix) {
+    // feed audio
+    if (ptPlan && audioPacket) {
+      try { await feedPassthrough(audioPacket, ptPlan); }
+      catch (e) {
+        console.warn('passthrough feed failed', e);
+        audioInfo.included = false; audioInfo.mode = 'none';
+        audioInfo.reason = 'copying the original audio failed (' + (e?.message || e) + ')';
+      }
+    } else if (selfEncodeAac && audioPacket && mix) {
+      try { await encodeMixToAac(audioPacket, mix, aacBitrate, () => cancelled); }
+      catch (e) {
+        console.warn('self-encode failed', e);
+        audioInfo.included = false; audioInfo.mode = 'none';
+        audioInfo.reason = 'encoding the mixed audio failed (' + (e?.message || e) + ')';
+      }
+    } else if (audioSource && mix) {
+      // feed audio in <=10s chunks so the encoder queue stays bounded
       const sr = mix.sampleRate, ch = mix.numberOfChannels, chunk = sr * 10;
       for (let off = 0; off < mix.length; off += chunk) {
         if (cancelled) throw cancelErr();
@@ -123,6 +297,7 @@ export function exportProject(project, opts = {}) {
         onProgress(0.02 + 0.10 * (off / mix.length));
       }
     }
+    if (ptPlan) disposeOpened(ptPlan.opened);   // audio copied; free the source readers before the video loop
     onProgress(0.12);
 
     // Bundled display fonts (Creepster) must be loaded before any text is drawn.
@@ -270,7 +445,7 @@ export function exportProject(project, opts = {}) {
       try {
         const probe = new Input({ formats: ALL_FORMATS, source: new BlobSource(blob) });
         const atrk = await probe.getPrimaryAudioTrack();
-        if (!atrk) { audioInfo.included = false; audioInfo.reason = 'the audio track did not mux (known iOS Safari AAC bug)'; }
+        if (!atrk) { audioInfo.included = false; audioInfo.reason = (audioInfo.mode === 'copy') ? 'the copied audio track did not write' : 'the audio track did not mux (iOS Safari AAC bug)'; }
         try { probe.dispose(); } catch (_) {}
       } catch (_) { /* verify is best-effort; don't fail a good export over it */ }
     }

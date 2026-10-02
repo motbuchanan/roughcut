@@ -739,7 +739,7 @@ async function runExport() {
     els.exDone.textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)}s \u00b7 ${r.w}\u00d7${r.h} \u00b7 ${fmtBytes(r.blob.size)}`;
     const au = r.audio || {};
     lastAudioInfo = au;
-    if (au.included) { els.exAudio.className = 'ex-status ok'; els.exAudio.textContent = `Audio included (${au.codec}) \u00b7 tap for details`; }
+    if (au.included) { const tag = au.mode === 'copy' ? ', original copy' : au.mode === 'encode-fix' ? ', mixed' : ''; els.exAudio.className = 'ex-status ok'; els.exAudio.textContent = `Audio included (${au.codec}${tag}) \u00b7 tap for details`; }
     else { els.exAudio.className = 'ex-status bad'; els.exAudio.textContent = `No audio \u2014 ${au.reason || 'unknown reason'} \u00b7 tap for details`; }
     let shareable = false;
     try { shareable = !!(navigator.canShare && navigator.canShare({ files: [new File([r.blob], exp.name, { type: 'video/mp4' })] })); } catch (_) {}
@@ -880,8 +880,8 @@ export function initUI() {
   els.exAgain.addEventListener('click', () => { showExportPane('setup'); exportSummary(); });
   els.exAudio.addEventListener('click', () => {
     const a = lastAudioInfo; if (!a) return;
-    const state = a.included ? `in as ${a.codec}` : `left out (${a.reason})`;
-    toast(`Audio ${state}. This device can encode: ${(a.encodable && a.encodable.length) ? a.encodable.join(', ') : 'nothing'}`, 7000);
+    const state = a.included ? `in as ${a.codec}${a.mode === 'copy' ? ' (copied, no re-encode)' : ' (re-encoded)'}` : `left out (${a.reason})`;
+    toast(`Audio ${state}. This device can encode: ${(a.encodable && a.encodable.length) ? a.encodable.join(', ') : 'not checked'}`, 7000);
   });
   els.settingsBtn.addEventListener('click', openSettings);
   els.settingsClose.addEventListener('click', closeSettings);
