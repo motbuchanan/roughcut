@@ -31,6 +31,7 @@ export class Preview {
     this._busy = false;
     this._dirty = false;
     this.hitBoxes = [];   // text hit boxes from the last paint (canvas px)
+    this.staticTextId = null; // a text being edited renders at rest (no animation) so it is stable to place
     this.tlUs = 0;
     this._scratch = null; // [canvasA, canvasB] for dual composites
     // once bundled fonts (Creepster) load, repaint so a spooky title stops
@@ -136,7 +137,7 @@ export class Preview {
   }
   _overlay() {
     if (!this.project) { this.hitBoxes = []; return; }
-    this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
+    this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs, { staticId: this.staticTextId });
     // dip/flash sits on top of everything, so titles dip with the picture
     drawTransitionAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
   }

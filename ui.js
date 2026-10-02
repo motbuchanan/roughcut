@@ -17,7 +17,7 @@ import { TRANSITIONS, TRANS_DURS, TRANS_DIRS, DIR_GLYPH, makeTransition, canHave
 import { usToS } from './state.js';
 import {
   makeText, addTextCmd, setTextCmd, duplicateTextCmd, textTrack, textDurUs,
-  FONTS, SIZES, COLORS, TEXT_DEFAULT_US,
+  FONTS, SIZES, COLORS, ANIMS, TEXT_DEFAULT_US,
 } from './text.js';
 import { exportProject, canExport } from './export.js';
 import { AudioEngine } from './audio.js';
@@ -185,6 +185,9 @@ function fadeLabel(us) { return us ? `${(us / 1e6).toFixed(us % 1e6 ? 1 : 0)}s` 
 function renderSheet() {
   const c = selectedClip();
   const isText = !!(c && laneOf(current, c.id) === 't');
+  // While a text is selected and we are not playing, render it at rest so it is
+  // stable to place/style; playback and export animate it.
+  if (previewer) previewer.staticTextId = (isText && !playTimer) ? c.id : null;
   els.textSheet.classList.toggle('hidden', !isText);
   els.sheet.classList.toggle('hidden', !c || isText);
   if (isText) { renderTextSheet(c); return; }
@@ -282,6 +285,11 @@ function renderTextSheet(it) {
   paintSeg(els.tsBg, ['none', 'pill', 'band'].indexOf(it.bg || 'none'));
   els.tsBold.setAttribute('aria-pressed', String(!!it.bold));
   els.tsColors.querySelectorAll('.swatch').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.color === (it.color || '#ffffff'))));
+  paintSeg(els.tsAnim, ANIMS.findIndex((a) => a.id === (it.anim || 'none')));
+  els.tsOutline.textContent = it.outline ? 'Outline on' : 'Outline off';
+  els.tsOutline.classList.toggle('on', !!it.outline);
+  els.tsGlow.textContent = it.glow ? 'Glow on' : 'Glow off';
+  els.tsGlow.classList.toggle('on', !!it.glow);
   els.tsRange.textContent = `${fmtTime(it.tlStartUs)} for ${fmtTime(textDurUs(it))}`;
 }
 function paintSeg(host, idx) { [...host.children].forEach((b, i) => b.setAttribute('aria-pressed', String(i === idx))); }
@@ -546,6 +554,7 @@ async function startPlay() {
   engine.start(current, fromUs, total);
   els.tpPlay.innerHTML = '&#10073;&#10073;'; // pause glyph
   view.setPlaying(true);
+  if (previewer) previewer.staticTextId = null;   // let text animate live during playback
   const step = () => {
     if (!playTimer || token !== playToken) return;
     const us = engine.nowUs();
@@ -562,6 +571,12 @@ function pausePlay() {
   playTimer = null;
   if (view) view.setPlaying(false);
   if (els.tpPlay) { els.tpPlay.innerHTML = '&#9654;'; els.tpPlay.disabled = mainTrack(current || { tracks: [{ id: 'v1', clips: [] }] }).clips.length === 0; }
+  // back to rest for the text being edited, if any
+  if (previewer && current && view) {
+    const sc = view.selectedId ? findClip(current, view.selectedId) : null;
+    previewer.staticTextId = (sc && laneOf(current, sc.id) === 't') ? sc.id : null;
+    previewer.repaintOverlay();
+  }
 }
 function togglePlay() { if (playTimer) pausePlay(); else startPlay(); }
 
@@ -702,6 +717,7 @@ function closeExport() {
   els.exportOverlay.classList.add('hidden');
   try { navigator.storage.getDirectory().then((r) => r.removeEntry('roughcut-export.tmp.mp4').catch(() => {})); } catch (_) {}
 }
+let lastAudioInfo = null;   // last export's audio result, for the tap-to-diagnose line
 async function runExport() {
   showExportPane('progress');
   els.exBar.style.width = '0%'; els.exStatus.className = 'ex-status'; els.exStatus.textContent = 'Starting\u2026';
@@ -721,6 +737,10 @@ async function runExport() {
     exp.url = URL.createObjectURL(r.blob);
     els.exPlayer.src = exp.url;
     els.exDone.textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)}s \u00b7 ${r.w}\u00d7${r.h} \u00b7 ${fmtBytes(r.blob.size)}`;
+    const au = r.audio || {};
+    lastAudioInfo = au;
+    if (au.included) { els.exAudio.className = 'ex-status ok'; els.exAudio.textContent = `Audio included (${au.codec}) \u00b7 tap for details`; }
+    else { els.exAudio.className = 'ex-status bad'; els.exAudio.textContent = `No audio \u2014 ${au.reason || 'unknown reason'} \u00b7 tap for details`; }
     let shareable = false;
     try { shareable = !!(navigator.canShare && navigator.canShare({ files: [new File([r.blob], exp.name, { type: 'video/mp4' })] })); } catch (_) {}
     els.exShare.disabled = !shareable;
@@ -775,17 +795,19 @@ export function initUI() {
     tlText: $('#tl-text'), tlTitle: $('#tl-title'),
     textSheet: $('#text-sheet'), tsText: $('#ts-text'), tsSize: $('#ts-size'), tsFont: $('#ts-font'), tsAlign: $('#ts-align'),
     tsBg: $('#ts-bg'), tsBold: $('#ts-bold'), tsColors: $('#ts-colors'), tsDup: $('#ts-dup'), tsRange: $('#ts-range'),
+    tsAnim: $('#ts-anim'), tsOutline: $('#ts-outline'), tsGlow: $('#ts-glow'),
     exportBtn: $('#export-btn'), exportOverlay: $('#export-overlay'), exportClose: $('#export-close'),
     exportSetup: $('#export-setup'), exportProgress: $('#export-progress'), exportResult: $('#export-result'),
     exRes: $('#ex-res'), exFps: $('#ex-fps'), exQuality: $('#ex-quality'), exSummary: $('#ex-summary'),
     exportRun: $('#export-run'), exBar: $('#ex-bar'), exStatus: $('#ex-status'), exportCancel: $('#export-cancel'),
-    exPlayer: $('#ex-player'), exDone: $('#ex-done'), exSave: $('#ex-save'), exShare: $('#ex-share'), exAgain: $('#ex-again'),
+    exPlayer: $('#ex-player'), exDone: $('#ex-done'), exAudio: $('#ex-audio'), exSave: $('#ex-save'), exShare: $('#ex-share'), exAgain: $('#ex-again'),
     settingsBtn: $('#settings-btn'), settingsOverlay: $('#settings-overlay'), settingsClose: $('#settings-close'), settingsDone: $('#settings-done'),
     setAspect: $('#set-aspect'), setBg: $('#set-bg'), setSummary: $('#set-summary'),
   };
   // build segmented controls + swatches once
   els.tsSize.innerHTML = SIZES.map((s) => `<button data-v="${s.v}">${s.label}</button>`).join('');
   els.tsFont.innerHTML = FONTS.map((f) => `<button data-v="${f.id}" style="font-family:${f.css}">${f.label}</button>`).join('');
+  els.tsAnim.innerHTML = ANIMS.map((a) => `<button data-v="${a.id}">${a.label}</button>`).join('');
   els.tsColors.innerHTML = COLORS.map((c) => `<button class="swatch" data-color="${c}" style="background:${c}" aria-label="${c}"></button>`).join('');
   els.csTransType.innerHTML = TRANSITIONS.map((t) => `<button data-t="${t.id}" aria-pressed="false">${t.label}</button>`).join('');
 
@@ -838,6 +860,9 @@ export function initUI() {
   els.tsBold.addEventListener('click', () => { const it = selectedClip(); if (it) setText({ bold: !it.bold }, 'Text weight'); });
   els.tsColors.addEventListener('click', (e) => { const b = e.target.closest('.swatch'); if (b) setText({ color: b.dataset.color }, 'Text color'); });
   els.tsDup.addEventListener('click', duplicateText);
+  els.tsAnim.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setText({ anim: b.dataset.v }, 'Text animation'); });
+  els.tsOutline.addEventListener('click', () => { const it = selectedClip(); if (it) setText({ outline: !it.outline }, 'Text outline'); });
+  els.tsGlow.addEventListener('click', () => { const it = selectedClip(); if (it) setText({ glow: !it.glow }, 'Text glow'); });
   els.preview.addEventListener('pointerdown', onPreviewDown);
   els.preview.addEventListener('pointermove', onPreviewMove);
   els.preview.addEventListener('pointerup', onPreviewUp);
@@ -853,6 +878,11 @@ export function initUI() {
   els.exSave.addEventListener('click', saveExport);
   els.exShare.addEventListener('click', shareExport);
   els.exAgain.addEventListener('click', () => { showExportPane('setup'); exportSummary(); });
+  els.exAudio.addEventListener('click', () => {
+    const a = lastAudioInfo; if (!a) return;
+    const state = a.included ? `in as ${a.codec}` : `left out (${a.reason})`;
+    toast(`Audio ${state}. This device can encode: ${(a.encodable && a.encodable.length) ? a.encodable.join(', ') : 'nothing'}`, 7000);
+  });
   els.settingsBtn.addEventListener('click', openSettings);
   els.settingsClose.addEventListener('click', closeSettings);
   els.settingsDone.addEventListener('click', closeSettings);

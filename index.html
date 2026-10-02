@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.25 &middot; Sep 29</button>
+      <button id="badge" class="badge" title="Tap for version">v0.27 &middot; Oct 2</button>
     </header>
 
     <main>
@@ -73,7 +73,7 @@
               <div class="seg" id="ts-size"></div>
               <button id="ts-bold" class="tlbtn wide" aria-pressed="true"><b>B</b></button>
             </div>
-            <div class="cs-row"><div class="seg" id="ts-font"></div></div>
+            <div class="cs-row"><div class="seg scroll" id="ts-font"></div></div>
             <div class="cs-row">
               <div class="seg" id="ts-align">
                 <button data-v="left">&#8676;</button><button data-v="center">&#8596;</button><button data-v="right">&#8677;</button>
@@ -86,7 +86,15 @@
               <div class="swatches" id="ts-colors"></div>
               <button id="ts-dup" class="tlbtn wide" style="margin-left:auto">Duplicate</button>
             </div>
-            <div class="ts-hint">Drag the text on the preview to place it. <span id="ts-range"></span></div>
+            <div class="cs-row">
+              <span class="cs-label">Move</span>
+              <div class="seg scroll" id="ts-anim"></div>
+            </div>
+            <div class="cs-row">
+              <button id="ts-outline" class="tlbtn wide grow">Outline off</button>
+              <button id="ts-glow" class="tlbtn wide grow">Glow off</button>
+            </div>
+            <div class="ts-hint">Drag the text on the preview to place it. Press play to see the animation. <span id="ts-range"></span></div>
           </div>
           <div class="clip-sheet hidden" id="clip-sheet">
             <span class="cs-name" id="cs-name"></span>
@@ -214,6 +222,7 @@
       <div id="export-result" class="hidden">
         <video id="ex-player" controls playsinline preload="metadata"></video>
         <div class="ex-status ok" id="ex-done"></div>
+        <div class="ex-status" id="ex-audio"></div>
         <div class="cs-row">
           <button id="ex-save" class="primary block">Save</button>
           <button id="ex-share" class="tlbtn wide">Share</button>

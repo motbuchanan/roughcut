@@ -16,7 +16,7 @@
 import {
   Input, BlobSource, ALL_FORMATS, Output, StreamTarget,
   Mp4OutputFormat, CanvasSink, CanvasSource, AudioBufferSource,
-  canEncodeVideo, canEncodeAudio, QUALITY_HIGH, QUALITY_MEDIUM,
+  canEncodeVideo, canEncodeAudio, getEncodableAudioCodecs, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
 import { readMedia, usToS, US } from './state.js';
 import { mainTrack, normalize } from './timeline.js';
@@ -77,17 +77,36 @@ export function exportProject(project, opts = {}) {
     const videoSource = new CanvasSource(canvas, { codec, bitrate: quality });
     output.addVideoTrack(videoSource, { frameRate: fps });
 
-    // Audio: mix offline first (0..12% of progress), add if present + encodable.
+    // Audio: mix offline first (0..12% of progress), then add it using the best
+    // codec THIS device can actually encode into an MP4. iOS Safari is why this is
+    // defensive: older iOS has no AudioEncoder at all, and some iOS builds encode
+    // AAC but hand back a broken config, so a naive "assume AAC" path exported
+    // silent videos with no explanation. We pick a codec, and ALWAYS record what
+    // happened (audioInfo) so a silent export is never a mystery again.
     let audioSource = null;
+    const audioInfo = { included: false, codec: null, reason: '', encodable: [] };
     onProgress(0.02);
     let mix = null;
-    try { mix = await renderTimelineAudio(project, total, 48000); } catch (e) { console.warn('audio mix failed, exporting silent', e); }
+    try { mix = await renderTimelineAudio(project, total, 48000); }
+    catch (e) { console.warn('audio mix failed, exporting silent', e); audioInfo.reason = 'could not mix the audio on this device'; }
     if (cancelled) throw cancelErr();
-    let aacOk = false;
-    if (mix) { try { aacOk = await canEncodeAudio('aac'); } catch (_) {} }
-    if (mix && aacOk) {
-      audioSource = new AudioBufferSource({ codec: 'aac', bitrate: quality });
-      output.addAudioTrack(audioSource);
+    if (mix) {
+      try { audioInfo.encodable = (await getEncodableAudioCodecs()) || []; } catch (_) {}
+      // MP4-friendly and iOS-playable, in order of preference.
+      let pick = null;
+      for (const c of ['aac', 'mp3', 'alac']) { try { if (await canEncodeAudio(c)) { pick = c; break; } } catch (_) {} }
+      if (pick) {
+        try {
+          audioSource = new AudioBufferSource({ codec: pick, bitrate: quality });
+          output.addAudioTrack(audioSource);
+          audioInfo.included = true; audioInfo.codec = pick;
+        } catch (e) { audioSource = null; audioInfo.included = false; audioInfo.reason = 'the audio encoder would not start (' + (e?.message || e) + ')'; }
+      } else {
+        audioInfo.reason = 'this browser can’t encode audio for MP4' +
+          (audioInfo.encodable.length ? ' (it can encode: ' + audioInfo.encodable.join(', ') + ')' : ' (it reports no audio encoders)');
+      }
+    } else if (!audioInfo.reason) {
+      audioInfo.reason = 'there was no audio on the timeline';
     }
 
     await output.start();
@@ -243,7 +262,20 @@ export function exportProject(project, opts = {}) {
     onProgress(1);
     // Disk-backed File; the browser streams it for preview/save/share.
     const blob = await fileHandle.getFile();
-    return { blob, ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps };
+
+    // Verify the audio actually muxed. If we added a track but re-opening the file
+    // finds none, the encoder silently failed (the iOS Safari AAC case), so say so
+    // instead of handing back a file the user will think is fine until it plays mute.
+    if (audioInfo.included) {
+      try {
+        const probe = new Input({ formats: ALL_FORMATS, source: new BlobSource(blob) });
+        const atrk = await probe.getPrimaryAudioTrack();
+        if (!atrk) { audioInfo.included = false; audioInfo.reason = 'the audio track did not mux (known iOS Safari AAC bug)'; }
+        try { probe.dispose(); } catch (_) {}
+      } catch (_) { /* verify is best-effort; don't fail a good export over it */ }
+    }
+
+    return { blob, ext: 'mp4', mime: 'video/mp4', w: W, h: H, fps, audio: audioInfo };
   })();
 
   return {
