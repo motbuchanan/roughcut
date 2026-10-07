@@ -121,6 +121,17 @@ async function onListClick(e) {
 
 // ---- editor --------------------------------------------------------------
 async function openEditor(id) {
+  // Fully reset any previous editor first, so one project's clips, preview, or pending
+  // save can never bleed into the next (iOS bug: a brand-new project showed the old
+  // project's clip in the timeline and it could not be deleted).
+  pausePlay();
+  try { await flushSave(); } catch (_) {}
+  if (previewer) { try { previewer.dispose(); } catch (_) {} previewer = null; }
+  if (view) { try { view.dispose(); } catch (_) {} view = null; }
+  if (engine) { try { engine.dispose(); } catch (_) {} engine = null; }
+  if (els.tlTrack) els.tlTrack.innerHTML = '';   // drop stale clip/lane/ruler nodes from a prior project
+  clearThumbUrls();
+
   current = await loadProject(id);
   normalize(current);
   els.editorTitle.textContent = current.name;
@@ -724,10 +735,10 @@ async function runExport() {
   const t0 = performance.now();
   exp.job = exportProject(current, {
     fps: exp.fps, quality: exp.quality, scale: exp.scale,
-    onProgress: (p) => {
+    onProgress: (p, msg) => {
       els.exBar.style.width = (p * 100).toFixed(1) + '%';
       const pct = Math.round(p * 100);
-      els.exStatus.textContent = p < 0.12 ? `Mixing audio\u2026 ${pct}%` : `Rendering video\u2026 ${pct}%`;
+      els.exStatus.textContent = msg ? msg : (p < 0.12 ? `Mixing audio\u2026 ${pct}%` : `Rendering video\u2026 ${pct}%`);
     },
   });
   try {
@@ -739,7 +750,7 @@ async function runExport() {
     els.exDone.textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)}s \u00b7 ${r.w}\u00d7${r.h} \u00b7 ${fmtBytes(r.blob.size)}`;
     const au = r.audio || {};
     lastAudioInfo = au;
-    if (au.included) { const tag = au.mode === 'copy' ? ', original copy' : au.mode === 'encode-fix' ? ', mixed' : ''; els.exAudio.className = 'ex-status ok'; els.exAudio.textContent = `Audio included (${au.codec}${tag}) \u00b7 tap for details`; }
+    if (au.included) { const tag = au.mode === 'copy' ? ', original copy' : (au.mode === 'encode-fix' || au.mode === 'ffmpeg') ? ', mixed' : ''; els.exAudio.className = 'ex-status ok'; els.exAudio.textContent = `Audio included (${au.codec}${tag}) \u00b7 tap for details`; }
     else { els.exAudio.className = 'ex-status bad'; els.exAudio.textContent = `No audio \u2014 ${au.reason || 'unknown reason'} \u00b7 tap for details`; }
     let shareable = false;
     try { shareable = !!(navigator.canShare && navigator.canShare({ files: [new File([r.blob], exp.name, { type: 'video/mp4' })] })); } catch (_) {}

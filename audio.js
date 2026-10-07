@@ -7,16 +7,77 @@
 //
 // Rules: silence is the resting state (stop() kills every node unconditionally);
 // decode lazily on first play; buffers live in an LRU capped by bytes so a
-// clip-heavy project cannot run the tab out of memory.
+// clip-heavy project cannot run the tab out of memory. Every real cut edge gets a
+// short declick ramp (DECLICK_S) in both the preview and the export mix.
 
 import { readMedia, usToS } from './state.js';
 import { mainTrack, clipDurUs, audioTrack } from './timeline.js';
 
 const MAX_CACHE_BYTES = 160 * 1024 * 1024;   // ~9 min of 48k stereo float
 const MIN_FADE_S = 0.005;
+// Declick: a cut that lands mid-waveform pops. Every real cut edge gets this short
+// ramp unless the user set a longer fade there. One number, shared by preview + export.
+export const DECLICK_S = 0.03;
+const PLAY_RAMP_S = 0.015;   // master ramp when playback starts
+
+const audibleOn = (lane, c, m) => !!m && (lane === 'a' || m.hasAudio) && !c.muted && (c.gain ?? 1) > 0;
+// b picks up exactly where a left off: same file, same source position, same level,
+// no user fade on the touching edges (a split with nothing trimmed). No ramp wanted.
+function joined(a, b) {
+  return a.mediaId === b.mediaId && a.outUs === b.inUs
+    && a.tlStartUs + clipDurUs(a) === b.tlStartUs
+    && (a.gain ?? 1) === (b.gain ?? 1)
+    && !((a.fadeOutUs || 0) > 0) && !((b.fadeInUs || 0) > 0);
+}
+// Which edges of each audible clip are real cuts. Map: clipId -> { head, tail }.
+// A seamless join (see joined) is false on both touching edges so a split stays sample-continuous.
+export function cutEdges(project, totalUs) {
+  const media = (id) => project.media.find((m) => m.id === id) || null;
+  const out = new Map();
+  const lane = (name, clips) => {
+    const list = clips.filter((c) => audibleOn(name, c, media(c.mediaId)))
+      .slice().sort((a, b) => a.tlStartUs - b.tlStartUs);
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i], prev = list[i - 1], next = list[i + 1];
+      const cutShort = name === 'a' && c.tlStartUs + clipDurUs(c) > totalUs;   // music chopped at the end of the video
+      out.set(c.id, { head: !(prev && joined(prev, c)), tail: cutShort || !(next && joined(c, next)) });
+    }
+  };
+  lane('v', mainTrack(project).clips);
+  const at = audioTrack(project);
+  lane('a', at ? at.clips : []);
+  return out;
+}
+// Fade lengths (seconds) for one clip: the user's fade, else the declick on a cut edge.
+function edgeFades(clip, edge) {
+  const uf = (us) => { const s = usToS(us || 0); return s > MIN_FADE_S ? s : 0; };
+  return {
+    fi: Math.max(uf(clip.fadeInUs), edge && edge.head ? DECLICK_S : 0),
+    fo: Math.max(uf(clip.fadeOutUs), edge && edge.tail ? DECLICK_S : 0),
+  };
+}
+// Schedule one clip's gain curve. cStart/cEnd are the clip's own start/end on the
+// context clock; `when` is where playback actually begins (>= cStart on a mid-clip
+// resume), so the curve is entered at the right point instead of jumping to full.
+export function scheduleEnvelope(param, vol, when, cStart, cEnd, fi, fo) {
+  const len = Math.max(0, cEnd - cStart);
+  if (fi + fo > len && fi + fo > 0) { const k = len / (fi + fo); fi *= k; fo *= k; }   // short clip: fades meet, never overlap
+  const fiEnd = cStart + fi, foStart = cEnd - fo;
+  const level = (t) => {
+    if (fi > 0 && t < fiEnd) return vol * Math.max(0, (t - cStart) / fi);
+    if (fo > 0 && t > foStart) return vol * Math.max(0, (cEnd - t) / fo);
+    return vol;
+  };
+  param.setValueAtTime(level(when), when);
+  if (fi > 0 && when < fiEnd) param.linearRampToValueAtTime(vol, fiEnd);
+  if (fo > 0) {
+    if (when < foStart) param.setValueAtTime(vol, foStart);
+    param.linearRampToValueAtTime(0, cEnd);
+  }
+}
 
 // Offline render of the whole timeline's audio to one AudioBuffer (export path).
-// Mirrors the live schedule: both lanes, per-clip gain/mute, fade in/out.
+// Mirrors the live schedule: both lanes, per-clip gain/mute, fade in/out, cut declick.
 // Returns null when there is no audible audio anywhere.
 export async function renderTimelineAudio(project, totalUs, sampleRate = 48000) {
   const media = (id) => project.media.find((m) => m.id === id) || null;
@@ -46,7 +107,7 @@ export async function renderTimelineAudio(project, totalUs, sampleRate = 48000) 
     decoded.set(m.id, buf);
     return buf;
   }
-  const MIN_FADE = 0.005;
+  const edges = cutEdges(project, totalUs);
   for (const { clip, media: m, end } of jobs) {
     let buffer;
     try { buffer = await bufFor(m); } catch (e) { console.warn('export decode skip', m.name, e); continue; }
@@ -58,11 +119,8 @@ export async function renderTimelineAudio(project, totalUs, sampleRate = 48000) 
     const src = ctx.createBufferSource(); src.buffer = buffer;
     const g = ctx.createGain();
     const vol = Math.max(0, Math.min(2, clip.gain ?? 1));
-    const fi = usToS(clip.fadeInUs || 0), fo = usToS(clip.fadeOutUs || 0);
-    const cEnd = when + dur;
-    if (fi > MIN_FADE) { g.gain.setValueAtTime(0.0001, when); g.gain.linearRampToValueAtTime(vol, when + Math.min(fi, dur)); }
-    else g.gain.setValueAtTime(vol, when);
-    if (fo > MIN_FADE) { const fs = Math.max(cEnd - fo, when); g.gain.setValueAtTime(vol, fs); g.gain.linearRampToValueAtTime(0.0001, cEnd); }
+    const { fi, fo } = edgeFades(clip, edges.get(clip.id));
+    scheduleEnvelope(g.gain, vol, when, when, when + dur, fi, fo);
     src.connect(g); g.connect(ctx.destination);
     src.start(when, offset, dur);
   }
@@ -165,10 +223,14 @@ export class AudioEngine {
   start(project, fromUs, totalUs) {
     this.stop();
     const ctx = this._ensureCtx();
-    this.master.gain.cancelScheduledValues(ctx.currentTime);
-    this.master.gain.setValueAtTime(1, ctx.currentTime);
     const t0 = ctx.currentTime + 0.05;   // small lead so the first nodes start together
+    // Pressing play mid-clip starts mid-waveform too: bring the master up over a few ms.
+    this.master.gain.cancelScheduledValues(ctx.currentTime);
+    this.master.gain.setValueAtTime(0, ctx.currentTime);
+    this.master.gain.setValueAtTime(0, t0);
+    this.master.gain.linearRampToValueAtTime(1, t0 + PLAY_RAMP_S);
     this.t0 = t0; this.fromUs = fromUs; this.playing = true;
+    const edges = cutEdges(project, totalUs);
 
     for (const { clip, media, lane } of this._audible(project, fromUs, totalUs)) {
       const entry = this.cache.get(media.id); if (!entry) continue;
@@ -185,26 +247,13 @@ export class AudioEngine {
       src.buffer = buffer;
       const g = ctx.createGain();
       const vol = Math.max(0, Math.min(2, clip.gain ?? 1));
-      const fi = usToS(clip.fadeInUs || 0), fo = usToS(clip.fadeOutUs || 0);
+      const { fi, fo } = edgeFades(clip, edges.get(clip.id));
       const cStart = t0 + usToS(clip.tlStartUs - fromUs);   // may be < now if we started mid-clip
       const cEnd = t0 + usToS(clipEnd - fromUs);
-      // Fade curves are anchored to the clip's own start/end so a mid-clip resume lands
-      // at the right point on the curve.
+      // The curve is anchored to the clip's own start/end, so a mid-clip resume lands
+      // at the right point on it (including inside a fade-out).
       g.gain.cancelScheduledValues(0);
-      if (fi > MIN_FADE_S) {
-        const fiEnd = cStart + fi;
-        if (fiEnd <= when) g.gain.setValueAtTime(vol, when);
-        else {
-          const v0 = vol * Math.max(0, (when - cStart) / fi);
-          g.gain.setValueAtTime(v0, when);
-          g.gain.linearRampToValueAtTime(vol, fiEnd);
-        }
-      } else g.gain.setValueAtTime(vol, when);
-      if (fo > MIN_FADE_S) {
-        const foStart = Math.max(cEnd - fo, when);
-        g.gain.setValueAtTime(vol, foStart);
-        g.gain.linearRampToValueAtTime(0.0001, cEnd);
-      }
+      scheduleEnvelope(g.gain, vol, when, cStart, cEnd, fi, fo);
       src.connect(g); g.connect(this.master);
       src.start(when, offset, dur);
       this.live.push({ src, gain: g, clipId: clip.id });
