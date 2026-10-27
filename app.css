@@ -390,3 +390,31 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
   transition: opacity .18s, transform .18s; max-width: 88vw; text-align: center; z-index: 50;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* v0.34 framing */
+.safebtn { position: absolute; top: 8px; right: 8px; min-height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(13,15,19,.75); color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; }
+.safebtn[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+#preview.panning { cursor: grabbing; }
+
+/* v0.35 colour */
+.cs-adj { flex-direction: column; align-items: stretch; gap: 4px; }
+.cs-adj label { display: flex; align-items: center; gap: 8px; }
+.cs-adj label span { flex: 0 0 62px; color: var(--muted); font-size: 13px; }
+.cs-adj label input { flex: 1 1 auto; min-width: 0; }
+.cs-adj label b { flex: 0 0 34px; text-align: right; font-size: 13px; font-weight: 600; }
+#cs-lut-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+/* v0.36 level envelope + ducking */
+.env-wrap { flex: 1 1 auto; min-width: 0; }
+.env { display: block; width: 100%; height: 72px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); touch-action: none; }
+
+/* v0.36 clip-sheet tabs */
+.cs-tabs { display: flex; gap: 4px; margin: 2px 0 6px; }
+.cs-tabs button { flex: 1 1 0; min-height: 32px; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; font: inherit; font-size: 13px; font-weight: 700; }
+.cs-tabs button[aria-pressed="true"] { color: var(--text); background: var(--panel); border-color: var(--accent); }
+.cs-row.tab-off { display: none !important; }
+
+/* v0.37 frame-step trim */
+.tpbtn.small { min-width: 48px; font-size: 13px; font-weight: 700; letter-spacing: -.02em; }
+.trimgrid { flex: 1 1 auto; display: grid; grid-template-columns: auto 1fr auto; gap: 6px; }
+.trimgrid .tlbtn { min-height: 38px; }

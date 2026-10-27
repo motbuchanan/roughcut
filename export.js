@@ -19,7 +19,7 @@ import {
   EncodedPacketSink, EncodedAudioPacketSource, EncodedPacket,
   canEncodeVideo, canEncodeAudio, getEncodableAudioCodecs, QUALITY_HIGH, QUALITY_MEDIUM,
 } from './mediabunny.js';
-import { readMedia, usToS, US } from './state.js';
+import { readMedia, usToS, US, clipSpeed } from './state.js';
 import { mainTrack, audioTrack, clipDurUs, normalize } from './timeline.js';
 
 // iOS and macOS Safari share a WebCodecs AAC bug: the ENCODED audio frames are valid,
@@ -92,6 +92,9 @@ async function encodeMixToAac(src, mix, bitrate, isCancelled) {
 import { drawTextsAt, ensureFonts } from './text.js';
 import { drawTransitionAt, planFrames, drawDualTransition, clampSrc } from './transitions.js';
 import { renderTimelineAudio } from './audio.js';
+import { drawFrame, fitBox } from './frame.js';
+import { gradeFrame, lookOf, hasLut, registerLut } from './color.js';
+import { readLut } from './state.js';
 import { muxAudioWithFfmpeg, audioBufferToWav } from './ffmpeg-audio.js';
 
 export async function canExport(codec = 'avc') {
@@ -113,7 +116,10 @@ function makeCanvas(W, H) {
 // opts: { fps, quality: 'high'|'medium', scale: 1|0.6667, codec?: 'avc', onProgress, signal }
 export function exportProject(project, opts = {}) {
   const fps = opts.fps || project.canvas.fps || 30;
-  const quality = opts.quality === 'medium' ? QUALITY_MEDIUM : QUALITY_HIGH;
+  // quality: 'high' | 'medium' (Mediabunny picks a bitrate for the size) | a number = explicit video bits/s
+  const explicit = Number(opts.quality);
+  const quality = explicit > 0 ? Math.round(explicit) : (opts.quality === 'medium' ? QUALITY_MEDIUM : QUALITY_HIGH);
+  const audioQuality = opts.quality === 'medium' ? QUALITY_MEDIUM : QUALITY_HIGH;
   const scale = opts.scale || 1;
   const codec = opts.codec || 'avc';
   const onProgress = opts.onProgress || (() => {});
@@ -168,6 +174,7 @@ export function exportProject(project, opts = {}) {
         if (!m) return null;                               // unknown media -> be safe, encode
         if (c.muted || !m.hasAudio) continue;              // intentional/absent audio -> silent span, fine
         if ((c.gain ?? 1) !== 1) return null;              // volume change -> encode
+        if (clipSpeed(c) !== 1) return null;               // speed change -> encode
         if ((c.fadeInUs || 0) > 0 || (c.fadeOutUs || 0) > 0) return null;  // fades -> encode
         if (m.kind !== 'video' && m.kind !== 'audio') continue;
         contrib.push({ clip: c, media: m });
@@ -260,7 +267,7 @@ export function exportProject(project, opts = {}) {
           for (const c of ['aac', 'mp3', 'alac']) { try { if (await canEncodeAudio(c)) { pick = c; break; } } catch (_) {} }
           if (pick) {
             try {
-              audioSource = new AudioBufferSource({ codec: pick, bitrate: quality });
+              audioSource = new AudioBufferSource({ codec: pick, bitrate: audioQuality });
               output.addAudioTrack(audioSource);
               audioInfo.included = true; audioInfo.codec = pick; audioInfo.mode = 'encode';
             } catch (e) { audioSource = null; audioInfo.included = false; audioInfo.reason = 'the audio encoder would not start (' + (e?.message || e) + ')'; }
@@ -308,6 +315,11 @@ export function exportProject(project, opts = {}) {
 
     // Bundled display fonts (Creepster) must be loaded before any text is drawn.
     await ensureFonts();
+    // Every LUT the cut uses must be in memory before the first frame.
+    for (const c of mainTrack(project).clips) {
+      const lut = lookOf(c).lut;
+      if (lut && !hasLut(lut.id)) { try { registerLut(lut.id, lut.size, await readLut(project.id, lut.id)); } catch (e) { console.warn('LUT missing, exporting without it', lut.id, e); } }
+    }
 
     // ---- video ----
     const dtUs = US / fps;
@@ -347,11 +359,12 @@ export function exportProject(project, opts = {}) {
           const f = await readMedia(project.id, m.opfs);
           const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
           const vtrack = await input.getPrimaryVideoTrack();
-          if (vtrack) src = { kind: 'video', input, sink: new CanvasSink(vtrack, { width: W, height: H, fit: 'contain', poolSize: 2 }), media: m };
+          const box = fitBox(m.w, m.h, W, H);   // decode at the clip's own aspect; framing is applied at draw
+          if (vtrack) src = { kind: 'video', input, sink: new CanvasSink(vtrack, { width: box.w, height: box.h, fit: 'contain', poolSize: 2 }), media: m, fw: box.w, fh: box.h, clip };
           else { try { input.dispose(); } catch (_) {} }
         } else if (m && m.kind === 'image') {
           const f = await readMedia(project.id, m.opfs);
-          src = { kind: 'image', bmp: await createImageBitmap(f) };
+          src = { kind: 'image', bmp: await createImageBitmap(f), clip };
         } else if (m && m.kind === 'color') {
           src = { kind: 'color', color: m.color || '#000' };
         }
@@ -373,8 +386,8 @@ export function exportProject(project, opts = {}) {
     // Draw a static (image/color/none) source, or a decoded frame canvas, into a ctx.
     const paintStatic = (c, src, frame) => {
       c.fillStyle = (src.kind === 'color') ? src.color : bg; c.fillRect(0, 0, W, H);
-      if (src.kind === 'image' && src.bmp) drawContain(c, src.bmp, src.bmp.width, src.bmp.height, W, H);
-      else if (frame) c.drawImage(frame, 0, 0, W, H);
+      if (src.kind === 'image' && src.bmp) drawFrame(c, W, H, gradeFrame(src.bmp, src.bmp.width, src.bmp.height, src.clip), src.bmp.width, src.bmp.height, src.clip);
+      else if (frame) drawFrame(c, W, H, gradeFrame(frame, src.fw, src.fh, src.clip), src.fw, src.fh, src.clip);
     };
     // Sequential frame iterator for a source over a list of source times (us).
     // Non-video sources yield null every frame (paintStatic handles them).

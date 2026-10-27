@@ -15,6 +15,8 @@
 //
 // Pure and DOM-free: the preview and the export share every function here.
 
+import { clipDurUs, tlToSrcUs } from './state.js';
+
 export const TRANS_DEFAULT_US = 500_000; // 0.5s
 export const TRANS_MIN_US = 100_000;
 
@@ -47,7 +49,7 @@ export function makeTransition(type = 'dipblack', durUs = TRANS_DEFAULT_US, dir 
   return t;
 }
 
-function dur(c) { return Math.max(0, c.outUs - c.inUs); }
+const dur = clipDurUs;   // timeline length (speed-aware)
 function mainClips(project) {
   const t = project && project.tracks && project.tracks.find((x) => x.id === 'v1');
   return (t && t.clips) ? t.clips : [];
@@ -99,8 +101,8 @@ export function drawTransitionAt(ctx, W, H, project, tlUs) {
 // what the media actually has (see clampSrc), which turns a missing handle into a
 // held edge frame.
 export function dualSourceUs(w, tlUs) {
-  const srcA = w.a.inUs + (tlUs - w.aStart);        // > a.outUs once past the cut
-  const srcB = w.b.inUs + (tlUs - w.start);         // < b.inUs before the cut
+  const srcA = tlToSrcUs(w.a, tlUs - w.aStart);     // > a.outUs once past the cut
+  const srcB = tlToSrcUs(w.b, tlUs - w.start);      // < b.inUs before the cut
   return { srcA, srcB };
 }
 export function clampSrc(us, media) {
@@ -148,7 +150,7 @@ export function planFrames(project, frameTimesUs) {
       const key = 's' + ci;
       if (!cur || cur.key !== key) { cur = { key, kind: 'solo', ci, idx: [], src: [] }; segs.push(cur); }
       cur.idx.push(i);
-      cur.src.push(ci >= 0 ? clips[ci].inUs + (t - bounds[ci]) : 0);
+      cur.src.push(ci >= 0 ? tlToSrcUs(clips[ci], t - bounds[ci]) : 0);
     }
   }
   return segs;

@@ -7,10 +7,14 @@ import {
   readThumb, scheduleSave, flushSave, CANVAS_PRESETS, loadPrefs, savePrefs, storageEstimate,
 } from './state.js';
 import { importFile } from './media.js';
+import { frameOf, isDefaultFrame, clampPan, ZOOM_MIN, ZOOM_MAX } from './frame.js';
+import { DUCK, DUCK_LABELS, duckOf, envAt, hasEnv } from './audio.js';
+import { PRESETS, lookOf, presetValues, parseCube, registerLut } from './color.js';
+import { writeLut, uid } from './state.js';
 import { Preview } from './preview.js';
 import {
-  CommandBus, addClipCmd, addAudioCmd, setClipAudioCmd, detachAudioCmd, findClip, laneOf, clipDurUs,
-  makeColorMedia, insertClipCmd, clipIndexAt, setClipTransitionCmd,
+  CommandBus, addClipCmd, addAudioCmd, setClipAudioCmd, detachAudioCmd, findClip, laneOf, clipDurUs, trimClipCmd, trimAudioCmd, tlToSrcUs, MIN_CLIP_US,
+  makeColorMedia, insertClipCmd, clipIndexAt, setClipTransitionCmd, setClipSpeedCmd, clipSpeed, SPEEDS, setClipFrameCmd, setClipLookCmd,
   TimelineView, sourceSecAt, mainTrack, normalize, totalUs, fmtTime,
 } from './timeline.js';
 import { TRANSITIONS, TRANS_DURS, TRANS_DIRS, DIR_GLYPH, makeTransition, canHaveTransIn, transitionAt, hasDirs, clampSrc } from './transitions.js';
@@ -139,6 +143,8 @@ async function openEditor(id) {
 
   previewer = new Preview(els.preview);
   previewer.sizeToProject(current);
+  previewer.showSafe = !!loadPrefs().safeZones;
+  els.safeBtn.setAttribute('aria-pressed', String(previewer.showSafe));
   previewer.clear();
 
   clearThumbUrls();
@@ -218,7 +224,273 @@ function renderSheet() {
   els.csTools.classList.toggle('hidden', !canPull);
   els.csDetach.classList.toggle('hidden', lane !== 'v');
   if (!canPull) closePull();
+  applyTab();
+  renderEnvRow(c, m, lane, silent);
+  renderDuckRow(c, lane);
+  renderTrimRow(c, lane);
+  renderSpeedRow(c, m, lane);
+  renderFrameRows(c, m, lane);
+  renderLookRows(c, m, lane);
   renderTransSheet(c);
+}
+
+// ---- colour: look presets, four sliders, .cube LUT (main-track picture clips) ----
+const ADJ = ['bright', 'contrast', 'sat', 'warm'];
+function renderLookRows(c, m, lane) {
+  const show = lane === 'v' && !!(m && (m.kind === 'video' || m.kind === 'image'));
+  for (const el of [els.csLookRow, els.csAdjRow, els.csLutRow]) el.classList.toggle('hidden', !show);
+  if (!show) return;
+  const l = lookOf(c);
+  [...els.csLook.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.p === l.preset)));
+  for (const k of ADJ) { els.adj[k].value = Math.round(l[k] * 100); els.adjVal[k].textContent = String(Math.round(l[k] * 100)); }
+  els.csLutName.textContent = l.lut ? l.lut.name : '';
+  els.csLutMix.classList.toggle('hidden', !l.lut); els.csLutClear.classList.toggle('hidden', !l.lut);
+  els.csLutImport.classList.toggle('hidden', !!l.lut);
+  if (l.lut) els.csLutMix.value = Math.round(l.lutMix * 100);
+}
+function pickLook(id) {
+  const c = selectedClip(); if (!c) return;
+  bus.do(setClipLookCmd(current, c.id, presetValues(id), id === 'none' ? 'Clear look' : 'Look: ' + id));
+}
+let adjBefore = null;
+function onAdjStart(k) { const c = selectedClip(); adjBefore = c ? { k, v: lookOf(c)[k] } : null; }
+function onAdjInput(k) {
+  const c = selectedClip(); if (!c) return;
+  const v = Math.max(-1, Math.min(1, Number(els.adj[k].value) / 100));
+  c.look = { ...(c.look || {}), [k]: v };          // live, uncommitted; sliders detach from the preset name
+  els.adjVal[k].textContent = String(Math.round(v * 100));
+  refreshPreview();
+}
+function onAdjChange(k) {
+  const c = selectedClip(); if (!c) return;
+  const v = Math.max(-1, Math.min(1, Number(els.adj[k].value) / 100));
+  const before = adjBefore && adjBefore.k === k ? adjBefore.v : lookOf(c)[k];
+  c.look = { ...(c.look || {}), [k]: before };     // revert, then commit as one undo step
+  if (v !== before) bus.do(setClipLookCmd(current, c.id, { [k]: v, preset: 'custom' }, 'Adjust ' + k));
+  adjBefore = null;
+}
+async function onLutPicked(fileList) {
+  const file = fileList && fileList[0]; const c = selectedClip(); if (!file || !c) return;
+  try {
+    const parsed = parseCube(await file.text());
+    const id = uid('lut');
+    await writeLut(current.id, id, parsed.data);
+    registerLut(id, parsed.size, parsed.data);
+    const name = (parsed.title || file.name.replace(/\.cube$/i, '')).slice(0, 40);
+    bus.do(setClipLookCmd(current, c.id, { lut: { id, name, size: parsed.size }, lutMix: 1 }, 'LUT: ' + name));
+    toast(`LUT loaded: ${name} (${parsed.size}\u00b3)`, 2200);
+  } catch (e) { toast('Could not read that .cube: ' + (e && e.message ? e.message : e), 4000); }
+}
+let lutMixBefore = null;
+function onLutMixStart() { const c = selectedClip(); lutMixBefore = c ? lookOf(c).lutMix : null; }
+function onLutMixInput() { const c = selectedClip(); if (!c) return; c.look = { ...(c.look || {}), lutMix: Number(els.csLutMix.value) / 100 }; refreshPreview(); }
+function onLutMixChange() {
+  const c = selectedClip(); if (!c) return;
+  const v = Number(els.csLutMix.value) / 100;
+  if (lutMixBefore != null) c.look = { ...(c.look || {}), lutMix: lutMixBefore };
+  if (v !== lutMixBefore) bus.do(setClipLookCmd(current, c.id, { lutMix: v }, 'LUT strength'));
+  lutMixBefore = null;
+}
+function clearLut() { const c = selectedClip(); if (!c) return; bus.do(setClipLookCmd(current, c.id, { lut: null }, 'Remove LUT')); }
+
+// ---- framing: fit / fill, rotate, zoom, drag-to-reposition (main-track picture clips) ----
+const fmtZoom = (s) => (s % 1 ? s.toFixed(2).replace(/0$/, '') : s.toFixed(1)) + '\u00d7';
+function renderFrameRows(c, m, lane) {
+  const show = lane === 'v' && !!(m && (m.kind === 'video' || m.kind === 'image'));
+  els.csFrameRow.classList.toggle('hidden', !show);
+  els.csZoomRow.classList.toggle('hidden', !show);
+  if (!show) return;
+  const f = frameOf(c);
+  [...els.csFit.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.f === f.fit)));
+  els.csRot.innerHTML = '&#8635; ' + f.rot + '&deg;';
+  els.csZoom.value = Math.round(f.scale * 100);
+  els.csZoomVal.textContent = fmtZoom(f.scale);
+  els.csFrameReset.disabled = isDefaultFrame(c);
+}
+function pickFit(fit) {
+  const c = selectedClip(); if (!c || frameOf(c).fit === fit) return;
+  bus.do(setClipFrameCmd(current, c.id, { fit }, fit === 'fill' ? 'Fill frame' : 'Fit frame'));
+  if (fit === 'fill') toast('Drag the picture to choose what stays in frame', 2200);
+}
+function rotateClip() {
+  const c = selectedClip(); if (!c) return;
+  bus.do(setClipFrameCmd(current, c.id, { rot: (frameOf(c).rot + 90) % 360 }, 'Rotate'));
+}
+function resetFrame() {
+  const c = selectedClip(); if (!c) return;
+  bus.do(setClipFrameCmd(current, c.id, { fit: 'fit', x: 0, y: 0, scale: 1, rot: 0 }, 'Reset framing'));
+}
+let zoomBefore = null;
+function onZoomStart() { const c = selectedClip(); zoomBefore = c ? frameOf(c).scale : null; }
+function onZoomInput() {
+  const c = selectedClip(); if (!c) return;
+  const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(els.csZoom.value) / 100));
+  c.xf = { x: 0, y: 0, scale: 1, rot: 0, opacity: 1, ...(c.xf || {}), scale: s };   // live, uncommitted
+  const d = previewer.currentFrameDims();
+  if (d) { const p = clampPan(els.preview.width, els.preview.height, d.fw, d.fh, c, c.xf.x, c.xf.y); c.xf.x = p.x; c.xf.y = p.y; }
+  els.csZoomVal.textContent = fmtZoom(s);
+  refreshPreview();
+}
+function onZoomChange() {
+  const c = selectedClip(); if (!c) return;
+  const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(els.csZoom.value) / 100));
+  const nx = c.xf ? c.xf.x : 0, ny = c.xf ? c.xf.y : 0;
+  if (zoomBefore != null) c.xf = { ...(c.xf || {}), scale: zoomBefore };   // revert, then commit as one undo step
+  if (s !== zoomBefore) bus.do(setClipFrameCmd(current, c.id, { scale: s, x: nx, y: ny }, 'Zoom'));
+  zoomBefore = null;
+}
+
+// ---- clip-sheet tabs: Audio / Picture / Color / Cut (the sheet outgrew one scroll) ----
+let csTab = loadPrefs().csTab || 'audio';
+function applyTab() {
+  [...els.csTabs.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === csTab)));
+  els.sheet.querySelectorAll('.cs-row[data-tab]').forEach((row) => row.classList.toggle('tab-off', row.dataset.tab !== csTab));
+}
+function pickTab(t) { csTab = t; const p = loadPrefs(); p.csTab = t; savePrefs(p); applyTab(); const c = selectedClip(); if (c) renderSheet(); }
+
+// ---- level envelope (any clip with audio): tap to add a point, drag to move it,
+// drag it off the bottom to delete. Points are fractions of the clip's timeline length.
+const ENV_MAX = 2, ENV_PAD = 10;
+let envDrag = null;
+function renderEnvRow(c, m, lane, silent) {
+  const show = !silent && (lane === 'a' || (lane === 'v' && !!(m && m.hasAudio)));
+  els.csEnvRow.classList.toggle('hidden', !show);
+  if (!show) return;
+  els.csEnvClear.disabled = !hasEnv(c);
+  paintEnv(c);
+}
+function envGeom() {
+  const cv = els.csEnv, W = cv.width, H = cv.height;
+  return { W, H, x0: ENV_PAD, x1: W - ENV_PAD, y0: ENV_PAD, y1: H - ENV_PAD };
+}
+function envToXY(p) { const g = envGeom(); return { x: g.x0 + p.t * (g.x1 - g.x0), y: g.y1 - (p.v / ENV_MAX) * (g.y1 - g.y0) }; }
+function xyToEnv(x, y) { const g = envGeom(); return { t: Math.max(0, Math.min(1, (x - g.x0) / (g.x1 - g.x0))), v: Math.max(0, Math.min(ENV_MAX, (g.y1 - y) / (g.y1 - g.y0) * ENV_MAX)) }; }
+function paintEnv(c) {
+  const cv = els.csEnv, ctx = cv.getContext('2d'), g = envGeom();
+  ctx.clearRect(0, 0, g.W, g.H);
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#f59847';
+  // reference line at 100%
+  const y100 = g.y1 - (1 / ENV_MAX) * (g.y1 - g.y0);
+  ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(g.x0, y100 + 0.5); ctx.lineTo(g.x1, y100 + 0.5); ctx.stroke(); ctx.setLineDash([]);
+  // curve
+  const env = hasEnv(c) ? c.env : [{ t: 0, v: 1 }, { t: 1, v: 1 }];
+  ctx.strokeStyle = accent; ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.beginPath();
+  const first = envToXY({ t: 0, v: envAt(env, 0) }); ctx.moveTo(first.x, first.y);
+  for (const p of env) { const q = envToXY(p); ctx.lineTo(q.x, q.y); }
+  const last = envToXY({ t: 1, v: envAt(env, 1) }); ctx.lineTo(last.x, last.y); ctx.stroke();
+  // playhead inside this clip
+  const dur = clipDurUs(c); const f = dur > 0 ? (view.playheadUs - c.tlStartUs) / dur : -1;
+  if (f >= 0 && f <= 1) { const x = g.x0 + f * (g.x1 - g.x0); ctx.strokeStyle = 'rgba(76,240,224,.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x, g.y0 - 6); ctx.lineTo(x, g.y1 + 6); ctx.stroke(); }
+  // points
+  if (hasEnv(c)) for (const p of c.env) { const q = envToXY(p); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = accent; ctx.beginPath(); ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); ctx.fill(); }
+  const pct = Math.round(envAt(env, Math.max(0, Math.min(1, f))) * 100);
+  if (f >= 0 && f <= 1) { ctx.font = '600 15px system-ui, sans-serif'; ctx.textAlign = 'right'; const label = pct + '%'; const tw = ctx.measureText(label).width + 10; ctx.fillStyle = 'rgba(13,15,19,.85)'; ctx.fillRect(g.x1 - tw, g.y1 - 16, tw, 20); ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText(label, g.x1 - 5, g.y1 - 1); }
+}
+function envPoint(e) { const r = els.csEnv.getBoundingClientRect(); return { x: (e.clientX - r.left) * (els.csEnv.width / r.width), y: (e.clientY - r.top) * (els.csEnv.height / r.height) }; }
+function onEnvDown(e) {
+  const c = selectedClip(); if (!c) return;
+  pausePlay();
+  const pt = envPoint(e);
+  const env = (c.env || []).map((p) => ({ ...p }));
+  let idx = -1, best = 20;
+  env.forEach((p, i) => { const q = envToXY(p); const d = Math.hypot(q.x - pt.x, q.y - pt.y); if (d < best) { best = d; idx = i; } });
+  if (idx < 0) { env.push(xyToEnv(pt.x, pt.y)); env.sort((a, b) => a.t - b.t); idx = env.findIndex((p) => p.t === xyToEnv(pt.x, pt.y).t); }
+  envDrag = { before: c.env ? c.env.map((p) => ({ ...p })) : undefined, env, idx, id: c.id, remove: false };
+  c.env = env;
+  els.csEnv.setPointerCapture(e.pointerId);
+  paintEnv(c); e.preventDefault();
+}
+function onEnvMove(e) {
+  const d = envDrag; if (!d) return;
+  const c = findClip(current, d.id); if (!c) return;
+  const pt = envPoint(e); const g = envGeom();
+  d.remove = pt.y > g.y1 + 28;
+  const np = xyToEnv(pt.x, pt.y);
+  const lo = d.idx > 0 ? d.env[d.idx - 1].t + 0.005 : 0, hi = d.idx < d.env.length - 1 ? d.env[d.idx + 1].t - 0.005 : 1;
+  d.env[d.idx] = { t: Math.max(lo, Math.min(hi, np.t)), v: d.remove ? d.env[d.idx].v : np.v };
+  c.env = d.env;
+  paintEnv(c);
+}
+function onEnvUp() {
+  const d = envDrag; envDrag = null; if (!d) return;
+  const c = findClip(current, d.id); if (!c) return;
+  let env = d.env.map((p) => ({ t: +p.t.toFixed(4), v: +p.v.toFixed(3) }));
+  if (d.remove) env.splice(d.idx, 1);
+  if (d.before === undefined) delete c.env; else c.env = d.before;     // revert, then commit as one undo step
+  const changed = JSON.stringify(env) !== JSON.stringify(d.before || []);
+  if (changed) bus.do(setClipAudioCmd(current, c.id, { env: env.length ? env : undefined }));
+  else paintEnv(c);
+}
+function clearEnv() { const c = selectedClip(); if (!c || !hasEnv(c)) return; bus.do(setClipAudioCmd(current, c.id, { env: undefined })); }
+
+// ---- ducking (music clips on the audio lane) ----
+function renderDuckRow(c, lane) {
+  const show = lane === 'a' && !c.detached;
+  els.csDuckRow.classList.toggle('hidden', !show);
+  if (!show) return;
+  const cur = duckOf(c);
+  [...els.csDuck.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.d === cur)));
+}
+function pickDuck(d) {
+  const c = selectedClip(); if (!c || duckOf(c) === d) return;
+  bus.do(setClipAudioCmd(current, c.id, { duck: d === 'off' ? undefined : d }));
+  if (d !== 'off') toast('Music drops under the voice on the video track and comes back in the gaps', 2600);
+}
+
+// ---- frame-step trimming (v0.37): one project frame at a time, or snap an edge to the playhead ----
+const frameUs = () => Math.max(1000, Math.round(1e6 / ((current && current.canvas && current.canvas.fps) || 30)));
+function renderTrimRow(c, lane) {
+  const show = lane === 'v' || lane === 'a';
+  els.csTrimRow.classList.toggle('hidden', !show);
+}
+function stepFrame(dir) {
+  if (!current) return;
+  pausePlay();
+  const fps = (current.canvas && current.canvas.fps) || 30;
+  const frame = Math.round(view.playheadUs * fps / 1e6) + dir;          // step by frame INDEX so 15 steps = exactly 0.5s
+  view.setPlayhead(Math.max(0, Math.min(totalUs(current), Math.round(frame * 1e6 / fps))), true);
+}
+// Move one edge by `dSrcUs` source microseconds (already speed-scaled), or to an absolute source position.
+function trimEdge(edge, newSrcUs) {
+  const c = selectedClip(); if (!c) return;
+  const lane = laneOf(current, c.id); if (lane !== 'v' && lane !== 'a') return;
+  const m = current.media.find((x) => x.id === c.mediaId);
+  const srcMax = (m && m.kind !== 'image' && m.durUs) ? m.durUs : Number.MAX_SAFE_INTEGER;
+  let newIn = c.inUs, newOut = c.outUs;
+  if (edge === 'in') newIn = Math.max(0, Math.min(newSrcUs, c.outUs - MIN_CLIP_US));
+  else newOut = Math.min(srcMax, Math.max(newSrcUs, c.inUs + MIN_CLIP_US));
+  if (newIn === c.inUs && newOut === c.outUs) { toast(edge === 'in' ? 'In point is at its limit' : 'Out point is at its limit', 1400); return; }
+  pausePlay();
+  if (lane === 'a') {
+    const newStart = Math.max(0, c.tlStartUs + Math.round((newIn - c.inUs) / clipSpeed(c)));   // music keeps its place
+    bus.do(trimAudioCmd(current, c.id, newIn, newOut, newStart));
+  } else bus.do(trimClipCmd(current, c.id, newIn, newOut));
+}
+function nudgeEdge(edge, dir) {
+  const c = selectedClip(); if (!c) return;
+  const d = Math.round(frameUs() * clipSpeed(c)) * dir;
+  trimEdge(edge, (edge === 'in' ? c.inUs : c.outUs) + d);
+}
+function edgeToPlayhead(edge) {
+  const c = selectedClip(); if (!c) return;
+  const local = Math.max(0, Math.min(view.playheadUs - c.tlStartUs, clipDurUs(c)));
+  trimEdge(edge, tlToSrcUs(c, local));
+}
+
+// ---- speed (main-track video clips) ----
+function renderSpeedRow(c, m, lane) {
+  const show = lane === 'v' && !!(m && m.kind === 'video');
+  els.csSpeedRow.classList.toggle('hidden', !show);
+  if (!show) return;
+  const cur = clipSpeed(c);
+  [...els.csSpeed.children].forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.s) === cur)));
+}
+function pickSpeed(speed) {
+  const c = selectedClip(); if (!c) return;
+  if (clipSpeed(c) === speed) return;
+  bus.do(setClipSpeedCmd(current, c.id, speed));
+  toast(speed === 1 ? 'Normal speed' : (speed < 1 ? `Slow-mo ${speed}\u00d7 (pitch drops with it)` : `${speed}\u00d7 faster`), 1600);
 }
 
 // ---- transitions (dip / flash at the cut in front of a main-track clip) ----
@@ -355,6 +627,20 @@ function onPreviewDown(e) {
       return;
     }
   }
+  // No text under the finger: drag the selected picture clip to reposition it,
+  // when that clip is the one on screen right now.
+  const sel = selectedClip();
+  if (!sel || laneOf(current, sel.id) !== 'v') return;
+  const onScreen = sourceSecAt(current, view.playheadUs).clip;
+  if (!onScreen || onScreen.id !== sel.id) return;
+  const m = current.media.find((x) => x.id === sel.mediaId);
+  if (!m || (m.kind !== 'video' && m.kind !== 'image')) return;
+  pausePlay();
+  els.preview.setPointerCapture(e.pointerId);
+  const f = frameOf(sel);
+  pdrag = { kind: 'frame', id: sel.id, x0: f.x, y0: f.y, sx: pt.x, sy: pt.y, moved: false };
+  els.preview.classList.add('panning');
+  e.preventDefault();
 }
 function onPreviewMove(e) {
   if (!pdrag) return;
@@ -362,6 +648,14 @@ function onPreviewMove(e) {
   const it = findClip(current, pdrag.id); if (!it) return;
   const dx = (pt.x - pdrag.sx) / els.preview.width, dy = (pt.y - pdrag.sy) / els.preview.height;
   if (Math.abs(dx) > 0.005 || Math.abs(dy) > 0.005) pdrag.moved = true;
+  if (pdrag.kind === 'frame') {
+    const d = previewer.currentFrameDims();
+    let nx = pdrag.x0 + dx, ny = pdrag.y0 + dy;
+    if (d) ({ x: nx, y: ny } = clampPan(els.preview.width, els.preview.height, d.fw, d.fh, it, nx, ny));
+    it.xf = { x: 0, y: 0, scale: 1, rot: 0, opacity: 1, ...(it.xf || {}), x: nx, y: ny };   // live, uncommitted
+    refreshPreview();
+    return;
+  }
   it.x = Math.max(0.05, Math.min(0.95, pdrag.x0 + dx));
   it.y = Math.max(0.05, Math.min(0.95, pdrag.y0 + dy));
   previewer.repaintOverlay();
@@ -369,8 +663,15 @@ function onPreviewMove(e) {
 function onPreviewUp() {
   if (!pdrag) return;
   const d = pdrag; pdrag = null;
-  els.preview.classList.remove('dragging');
+  els.preview.classList.remove('dragging'); els.preview.classList.remove('panning');
   const it = findClip(current, d.id); if (!it) return;
+  if (d.kind === 'frame') {
+    const nx = it.xf ? it.xf.x : 0, ny = it.xf ? it.xf.y : 0;
+    it.xf = { ...(it.xf || {}), x: d.x0, y: d.y0 };   // revert, then commit as one undo step
+    if (d.moved) bus.do(setClipFrameCmd(current, d.id, { x: nx, y: ny }, 'Reposition'));
+    else refreshPreview();
+    return;
+  }
   const nx = it.x, ny = it.y;
   it.x = d.x0; it.y = d.y0;
   if (d.moved) bus.do(setTextCmd(current, d.id, { x: nx, y: ny }, 'Move text'));
@@ -521,10 +822,13 @@ function updateToolbar() {
   els.tpPlay.disabled = !has;
   els.tpStart.disabled = !has;
   els.tpEnd.disabled = !has;
+  els.tpPrevF.disabled = !has;
+  els.tpNextF.disabled = !has;
   els.tlHint.classList.toggle('hidden', has && bus.undoStack.length > 2);
 }
 
 function refreshPreview() {
+  { const sc = selectedClip(); if (sc && els.csEnvRow && !els.csEnvRow.classList.contains('hidden') && !envDrag) paintEnv(sc); }
   const { clip, sourceSec } = sourceSecAt(current, view.playheadUs);
   if (!clip) { previewer.renderAt(current, null, 0, view.playheadUs); els.previewHint.style.display = 'flex'; return; }
   els.previewHint.style.display = 'none';
@@ -539,7 +843,7 @@ function refreshPreview() {
     }
   }
   const media = current.media.find((m) => m.id === clip.mediaId) || null;
-  previewer.renderAt(current, media, sourceSec, view.playheadUs);
+  previewer.renderAt(current, media, sourceSec, view.playheadUs, clip);
 }
 
 // single funnel for every playhead move (strip scroll, play loop, select, edit)
@@ -696,15 +1000,28 @@ function setBg(hex) { current.canvas.bg = hex; applyCanvas(); }
 // Default to 720p (scale 0.6667 of a 1080-wide project): full 1080p in-browser
 // export holds the whole MP4 in memory and can exhaust a phone tab on longer clips.
 let exp = { job: null, blob: null, name: '', scale: 0.6667, fps: 24, quality: 'high', url: null };
+{ const p = loadPrefs(); if (p.exScale) exp.scale = p.exScale; if (p.exFps) exp.fps = p.exFps; if (p.exQuality) exp.quality = p.exQuality; }
+function saveExportPrefs() { const p = loadPrefs(); p.exScale = exp.scale; p.exFps = exp.fps; p.exQuality = exp.quality; savePrefs(p); }
+function paintExportSegs() {
+  const sel = (seg, pred) => [...seg.children].forEach((b) => b.setAttribute('aria-pressed', String(pred(b))));
+  sel(els.exRes, (b) => Math.abs(parseFloat(b.dataset.scale) - exp.scale) < 0.001);
+  sel(els.exFps, (b) => parseInt(b.dataset.fps, 10) === exp.fps);
+  sel(els.exQuality, (b) => String(b.dataset.q) === String(exp.quality));
+}
 function exportSummary() {
   const W = Math.round(current.canvas.w * exp.scale / 2) * 2;
   const H = Math.round(current.canvas.h * exp.scale / 2) * 2;
   const full = exp.scale >= 0.999;
-  els.exSummary.textContent = `${W}\u00d7${H} \u00b7 ${exp.fps} fps \u00b7 ${fmtTime(totalUs(current))} \u00b7 H.264 + AAC MP4`;
-  // Honest heads-up: full-res export can run a phone out of memory on longer clips.
-  const longFull = full && totalUs(current) > 45 * 1e6;
+  const secs = usToS(totalUs(current));
+  const vbr = Number(exp.quality);
+  const est = vbr > 0 ? ` \u00b7 about ${fmtBytes((vbr + 160000) * secs / 8)}` : '';
+  els.exSummary.textContent = `${W}\u00d7${H} \u00b7 ${exp.fps} fps \u00b7 ${fmtTime(totalUs(current))}${est} \u00b7 H.264 + AAC MP4`;
+  // Honest heads-up: full-res, 60 fps, or a long clip at Full can exceed an older phone's encoder.
+  const longFull = full && secs > 45;
+  const heavy = full || exp.fps >= 60;
   els.exSummary.style.color = longFull ? 'var(--danger)' : '';
-  if (full) els.exSummary.textContent += longFull ? '  \u2014 long clip at Full may not finish on a phone; 720p is safer' : '  \u2014 Full is heavier on phones';
+  if (longFull) els.exSummary.textContent += '. A long clip at Full may not finish on a phone; 720p is safer.';
+  else if (heavy) els.exSummary.textContent += exp.fps >= 60 ? '. 60 fps is heavy; older phones may fail or drop frames.' : '. Full is heavier on phones.';
 }
 async function openExport() {
   if (!mainTrack(current).clips.length) { toast('Add clips to the timeline first'); return; }
@@ -794,11 +1111,20 @@ export function initUI() {
     tlUndo: $('#tl-undo'), tlRedo: $('#tl-redo'), tlSplit: $('#tl-split'), tlDelete: $('#tl-delete'),
     tlZoomOut: $('#tl-zoomout'), tlZoomIn: $('#tl-zoomin'),
     tlScroll: $('#tl-scroll'), tlTrack: $('#tl-track'), tlHint: $('#tl-hint'),
-    tpStart: $('#tp-start'), tpPlay: $('#tp-play'), tpEnd: $('#tp-end'), tpTime: $('#tp-time'),
+    tpStart: $('#tp-start'), tpPlay: $('#tp-play'), tpEnd: $('#tp-end'), tpTime: $('#tp-time'), tpPrevF: $('#tp-prevf'), tpNextF: $('#tp-nextf'),
+    csTrimRow: $('#cs-trim-row'),
     sheet: $('#clip-sheet'), csName: $('#cs-name'), csVol: $('#cs-vol'), csVolVal: $('#cs-vol-val'),
     csMute: $('#cs-mute'), csFadeIn: $('#cs-fadein'), csFadeOut: $('#cs-fadeout'),
     csTools: $('#cs-tools'), csDetach: $('#cs-detach'), csPull: $('#cs-pull'),
     csTrans: $('#cs-trans'), csTransType: $('#cs-trans-type'), csTransDur: $('#cs-trans-dur'), csTransDir: $('#cs-trans-dir'),
+    csSpeedRow: $('#cs-speed-row'), csSpeed: $('#cs-speed'),
+    csTabs: $('#cs-tabs'), csEnvRow: $('#cs-env-row'), csEnv: $('#cs-env'), csEnvClear: $('#cs-env-clear'), csDuckRow: $('#cs-duck-row'), csDuck: $('#cs-duck'),
+    csFrameRow: $('#cs-frame-row'), csFit: $('#cs-fit'), csRot: $('#cs-rot'), csFrameReset: $('#cs-frame-reset'),
+    csZoomRow: $('#cs-zoom-row'), csZoom: $('#cs-zoom'), csZoomVal: $('#cs-zoom-val'), safeBtn: $('#safe-btn'),
+    csLookRow: $('#cs-look-row'), csLook: $('#cs-look'), csAdjRow: $('#cs-adj-row'), csLutRow: $('#cs-lut-row'),
+    csLutImport: $('#cs-lut-import'), csLutName: $('#cs-lut-name'), csLutMix: $('#cs-lut-mix'), csLutClear: $('#cs-lut-clear'), lutInput: $('#lut-input'),
+    adj: { bright: $('#cs-bright'), contrast: $('#cs-contrast'), sat: $('#cs-sat'), warm: $('#cs-warm') },
+    adjVal: { bright: $('#cs-bright-val'), contrast: $('#cs-contrast-val'), sat: $('#cs-sat-val'), warm: $('#cs-warm-val') },
     pullSheet: $('#pull-sheet'), pullClose: $('#pull-close'), pullChips: $('#pull-chips'), pullName: $('#pull-name'),
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
@@ -821,6 +1147,46 @@ export function initUI() {
   els.tsAnim.innerHTML = ANIMS.map((a) => `<button data-v="${a.id}">${a.label}</button>`).join('');
   els.tsColors.innerHTML = COLORS.map((c) => `<button class="swatch" data-color="${c}" style="background:${c}" aria-label="${c}"></button>`).join('');
   els.csTransType.innerHTML = TRANSITIONS.map((t) => `<button data-t="${t.id}" aria-pressed="false">${t.label}</button>`).join('');
+  els.csSpeed.innerHTML = SPEEDS.map((s) => `<button data-s="${s}" aria-pressed="false">${s}\u00d7</button>`).join('');
+  els.csSpeed.addEventListener('click', (e) => { const b = e.target.closest('button[data-s]'); if (b) pickSpeed(Number(b.dataset.s)); });
+  els.csFit.addEventListener('click', (e) => { const b = e.target.closest('button[data-f]'); if (b) pickFit(b.dataset.f); });
+  els.csTabs.addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (b) pickTab(b.dataset.tab); });
+  els.csEnv.addEventListener('pointerdown', onEnvDown);
+  els.csEnv.addEventListener('pointermove', onEnvMove);
+  els.csEnv.addEventListener('pointerup', onEnvUp);
+  els.csEnv.addEventListener('pointercancel', onEnvUp);
+  els.csEnvClear.addEventListener('click', clearEnv);
+  els.csDuck.innerHTML = Object.keys(DUCK).map((k) => `<button data-d="${k}" aria-pressed="false">${DUCK_LABELS[k]}</button>`).join('');
+  els.csDuck.addEventListener('click', (e) => { const b = e.target.closest('button[data-d]'); if (b) pickDuck(b.dataset.d); });
+  els.csLook.innerHTML = PRESETS.map((p) => `<button data-p="${p.id}" aria-pressed="false">${p.label}</button>`).join('');
+  els.csLook.addEventListener('click', (e) => { const b = e.target.closest('button[data-p]'); if (b) pickLook(b.dataset.p); });
+  for (const k of ['bright', 'contrast', 'sat', 'warm']) {
+    els.adj[k].addEventListener('pointerdown', () => onAdjStart(k));
+    els.adj[k].addEventListener('keydown', () => onAdjStart(k));
+    els.adj[k].addEventListener('input', () => onAdjInput(k));
+    els.adj[k].addEventListener('change', () => onAdjChange(k));
+  }
+  els.csLutImport.addEventListener('click', () => els.lutInput.click());
+  els.lutInput.addEventListener('change', (e) => { onLutPicked(e.target.files); e.target.value = ''; });
+  els.csLutMix.addEventListener('pointerdown', onLutMixStart);
+  els.csLutMix.addEventListener('keydown', onLutMixStart);
+  els.csLutMix.addEventListener('input', onLutMixInput);
+  els.csLutMix.addEventListener('change', onLutMixChange);
+  els.csLutClear.addEventListener('click', clearLut);
+  els.csRot.addEventListener('click', rotateClip);
+  els.csFrameReset.addEventListener('click', resetFrame);
+  els.csZoom.addEventListener('pointerdown', onZoomStart);
+  els.csZoom.addEventListener('keydown', onZoomStart);
+  els.csZoom.addEventListener('input', onZoomInput);
+  els.csZoom.addEventListener('change', onZoomChange);
+  els.safeBtn.addEventListener('click', () => {
+    const on = !previewer.showSafe; previewer.showSafe = on;
+    els.safeBtn.setAttribute('aria-pressed', String(on));
+    const p = loadPrefs(); p.safeZones = on; savePrefs(p);
+    previewer.repaintOverlay();
+    if (on) toast('Shaded = covered by the app. Dashed = what the feed shows at 4:5. Preview only.', 3200);
+  });
+
 
   els.newBtn.addEventListener('click', newProjectFlow);
   els.projectList.addEventListener('click', onListClick);
@@ -881,9 +1247,10 @@ export function initUI() {
 
   els.exportBtn.addEventListener('click', openExport);
   els.exportClose.addEventListener('click', closeExport);
-  els.exRes.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; exp.scale = parseFloat(b.dataset.scale); paintSeg(els.exRes, [...els.exRes.children].indexOf(b)); exportSummary(); });
-  els.exFps.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; exp.fps = parseInt(b.dataset.fps, 10); paintSeg(els.exFps, [...els.exFps.children].indexOf(b)); exportSummary(); });
-  els.exQuality.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; exp.quality = b.dataset.q; paintSeg(els.exQuality, [...els.exQuality.children].indexOf(b)); });
+  els.exRes.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; exp.scale = parseFloat(b.dataset.scale); paintExportSegs(); saveExportPrefs(); exportSummary(); });
+  els.exFps.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; exp.fps = parseInt(b.dataset.fps, 10); paintExportSegs(); saveExportPrefs(); exportSummary(); });
+  els.exQuality.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; const q = b.dataset.q; exp.quality = /^\d+$/.test(q) ? Number(q) : q; paintExportSegs(); saveExportPrefs(); exportSummary(); });
+  paintExportSegs();
   els.exportRun.addEventListener('click', runExport);
   els.exportCancel.addEventListener('click', () => { if (exp.job) exp.job.cancel(); });
   els.exSave.addEventListener('click', saveExport);
@@ -900,6 +1267,14 @@ export function initUI() {
   els.setAspect.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setAspect(b.dataset.k); });
   els.setBg.addEventListener('click', (e) => { const b = e.target.closest('.swatch'); if (b) setBg(b.dataset.c); });
   els.tpStart.addEventListener('click', () => { pausePlay(); view.setPlayhead(0); });
+  els.tpPrevF.addEventListener('click', () => stepFrame(-1));
+  els.tpNextF.addEventListener('click', () => stepFrame(1));
+  els.sheet.querySelector('#cs-in-prev').addEventListener('click', () => nudgeEdge('in', -1));
+  els.sheet.querySelector('#cs-in-next').addEventListener('click', () => nudgeEdge('in', 1));
+  els.sheet.querySelector('#cs-out-prev').addEventListener('click', () => nudgeEdge('out', -1));
+  els.sheet.querySelector('#cs-out-next').addEventListener('click', () => nudgeEdge('out', 1));
+  els.sheet.querySelector('#cs-in-here').addEventListener('click', () => edgeToPlayhead('in'));
+  els.sheet.querySelector('#cs-out-here').addEventListener('click', () => edgeToPlayhead('out'));
   els.tpEnd.addEventListener('click', () => { pausePlay(); view.setPlayhead(totalUs(current)); });
 
   renderList();

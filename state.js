@@ -6,6 +6,17 @@ export const US = 1_000_000; // microseconds per second
 export const sToUs = (s) => Math.round(s * US);
 export const usToS = (us) => us / US;
 
+// ---- clip speed (v0.33) --------------------------------------------------
+// A clip's speed is a playback multiplier on its source range: 2 plays twice as
+// fast (half the timeline length), 0.5 is slow-mo (frames held twice). Source
+// in/out points never change with speed; only the timeline length does.
+export const SPEEDS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+export const clipSpeed = (c) => { const s = Number(c && c.speed); return s > 0 ? s : 1; };
+// Timeline length of a clip, in integer microseconds.
+export const clipDurUs = (c) => Math.max(0, Math.round((c.outUs - c.inUs) / clipSpeed(c)));
+// A timeline offset inside the clip -> the source position it shows.
+export const tlToSrcUs = (c, localTlUs) => c.inUs + Math.round(localTlUs * clipSpeed(c));
+
 // ---- guarded localStorage (in-memory fallback) ---------------------------
 function makeStore() {
   let backing;
@@ -245,6 +256,20 @@ export async function readThumb(projectId, mediaId) {
   const td = await subDir(projectId, 'thumbs', false);
   const fh = await td.getFileHandle(`${mediaId}.jpg`, { create: false });
   return fh.getFile();
+}
+
+// ---- LUT tables (v0.35): raw Float32 cube data, one file per imported .cube ----
+export async function writeLut(projectId, lutId, data) {
+  const d = await subDir(projectId, 'luts', true);
+  const fh = await d.getFileHandle(`${lutId}.f32`, { create: true });
+  const w = await fh.createWritable();
+  await w.write(new Blob([data.buffer]));
+  await w.close();
+}
+export async function readLut(projectId, lutId) {
+  const d = await subDir(projectId, 'luts', false);
+  const fh = await d.getFileHandle(`${lutId}.f32`, { create: false });
+  return new Float32Array(await (await fh.getFile()).arrayBuffer());
 }
 
 // ---- storage estimate (M6 uses this; expose now) -------------------------

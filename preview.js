@@ -10,6 +10,9 @@ import { Input, BlobSource, ALL_FORMATS, CanvasSink } from './mediabunny.js';
 import { readMedia } from './state.js';
 import { drawTextsAt, ensureFonts } from './text.js';
 import { drawTransitionAt, drawDualTransition } from './transitions.js';
+import { drawFrame, drawSafeZones } from './frame.js';
+import { gradeFrame, lookOf, hasLut, registerLut } from './color.js';
+import { readLut } from './state.js';
 
 export function draftSize(canvas, maxEdge = 720) {
   const ar = canvas.w / canvas.h;
@@ -33,6 +36,7 @@ export class Preview {
     this.hitBoxes = [];   // text hit boxes from the last paint (canvas px)
     this.staticTextId = null; // a text being edited renders at rest (no animation) so it is stable to place
     this.tlUs = 0;
+    this.showSafe = false;  // preview-only safe-zone guide
     this._scratch = null; // [canvasA, canvasB] for dual composites
     // once bundled fonts (Creepster) load, repaint so a spooky title stops
     // showing in the fallback font.
@@ -100,24 +104,50 @@ export class Preview {
   }
   _dropAux() { if (this.aux) { this._close(this.aux); this.aux = null; } }
 
-  // Paint one source's frame (bg-filled, contain-fit) into ctx c. Returns false on decode error.
-  async _paint(c, st, sourceSec) {
+  // Paint one source's frame into ctx c, framed per the clip (fit/fill/zoom/pan/rot).
+  // Returns false on decode error. The decoded frame is cached per source position
+  // so repaints while dragging text or reframing never re-decode.
+  async _paint(c, st, sourceSec, clip) {
+    const W = this.canvas.width, H = this.canvas.height;
     if (st.kind === 'color') { this.clear(st.color, c); return true; }
-    if (st.kind === 'image') { this.clear(undefined, c); this._drawContained(c, st.bitmap, st.bitmap.width, st.bitmap.height); return true; }
+    await this._ensureLut(clip);
+    if (st.kind === 'image') { this.clear(undefined, c); drawFrame(c, W, H, gradeFrame(st.bitmap, st.bitmap.width, st.bitmap.height, clip), st.bitmap.width, st.bitmap.height, clip); return true; }
     if (!st.sink) { this.clear(undefined, c); return true; }
-    let wrapped = null;
-    try { wrapped = await st.sink.getCanvas(Math.max(0, sourceSec)); } catch (e) { return false; }
+    const sec = Math.max(0, sourceSec);
+    if (!(st.cache && st.cacheSec === sec)) {
+      let wrapped = null;
+      try { wrapped = await st.sink.getCanvas(sec); } catch (e) { return false; }
+      if (wrapped) {
+        if (!st.cache || st.cache.width !== st.frameW || st.cache.height !== st.frameH) {
+          st.cache = document.createElement('canvas'); st.cache.width = st.frameW; st.cache.height = st.frameH;
+        }
+        const cc = st.cache.getContext('2d'); cc.clearRect(0, 0, st.frameW, st.frameH); cc.drawImage(wrapped.canvas, 0, 0, st.frameW, st.frameH);
+        st.cacheSec = sec;
+      } else st.cacheSec = -1;
+    }
     this.clear(undefined, c);
-    if (wrapped) this._drawContained(c, wrapped.canvas, st.frameW, st.frameH);
+    if (st.cache && st.cacheSec === sec) drawFrame(c, W, H, gradeFrame(st.cache, st.frameW, st.frameH, clip), st.frameW, st.frameH, clip);
     return true;
+  }
+  // A clip's LUT table must be in memory before it can grade; load it from OPFS once.
+  async _ensureLut(clip) {
+    const lut = lookOf(clip).lut; if (!lut || hasLut(lut.id) || !this.project) return;
+    try { registerLut(lut.id, lut.size, await readLut(this.project.id, lut.id)); } catch (e) { console.warn('LUT missing', lut.id, e); }
+  }
+  // Native size of the frame currently on screen (for pan limits), or null.
+  currentFrameDims() {
+    const st = this.cur; if (!st) return null;
+    if (st.kind === 'image' && st.bitmap) return { fw: st.bitmap.width, fh: st.bitmap.height };
+    if (st.kind === 'video') return { fw: st.frameW, fh: st.frameH };
+    return null;
   }
 
   // Public entry: render `media` at `sourceSec`. Coalesces to latest.
-  renderAt(project, media, sourceSec, tlUs = 0) {
+  renderAt(project, media, sourceSec, tlUs = 0, clip = null) {
     this.project = project;
     this.tlUs = tlUs;
     if (!media) { this._target = null; this._dropAux(); this.clear(); this._overlay(); return; }
-    this._target = { media, sourceSec, tlUs };
+    this._target = { media, sourceSec, tlUs, clip };
     if (this._busy) { this._dirty = true; return; }
     this._pump();
   }
@@ -140,6 +170,7 @@ export class Preview {
     this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs, { staticId: this.staticTextId });
     // dip/flash sits on top of everything, so titles dip with the picture
     drawTransitionAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs);
+    if (this.showSafe) drawSafeZones(this.ctx, this.canvas.width, this.canvas.height);
   }
   _scratchPair() {
     const W = this.canvas.width, H = this.canvas.height;
@@ -163,15 +194,15 @@ export class Preview {
           catch (e) { this._paintError('Media offline'); break; }
           const [sa, sb] = this._scratchPair();
           const ca = sa.getContext('2d'), cb = sb.getContext('2d');
-          const okA = await this._paint(ca, this.cur, t.srcA);
-          const okB = await this._paint(cb, this.aux, t.srcB);
+          const okA = await this._paint(ca, this.cur, t.srcA, t.tr.a);
+          const okB = await this._paint(cb, this.aux, t.srcB, t.tr.b);
           if (!okA && !okB) { this._paintError('decode'); continue; }
           drawDualTransition(this.ctx, this.canvas.width, this.canvas.height, t.tr.type, t.tr.dir, t.tr.x, sa, sb);
         } else {
           this._dropAux();
           try { await this._ensure(t.media); }
           catch (e) { this._paintError('Media offline'); break; }
-          const ok = await this._paint(this.ctx, this.cur, t.sourceSec);
+          const ok = await this._paint(this.ctx, this.cur, t.sourceSec, t.clip);
           if (!ok) { this._paintError('decode'); continue; }
         }
         this._overlay();
