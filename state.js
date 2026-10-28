@@ -272,6 +272,25 @@ export async function readLut(projectId, lutId) {
   return new Float32Array(await (await fh.getFile()).arrayBuffer());
 }
 
+// ---- transcripts (v0.42): one JSON per source file, so captions rebuild without re-listening ----
+export async function writeTranscript(projectId, mediaId, obj) {
+  const d = await subDir(projectId, 'transcripts', true);
+  const fh = await d.getFileHandle(`${mediaId}.json`, { create: true });
+  const w = await fh.createWritable();
+  await w.write(JSON.stringify(obj));
+  await w.close();
+}
+export async function readTranscript(projectId, mediaId) {
+  try {
+    const d = await subDir(projectId, 'transcripts', false);
+    const fh = await d.getFileHandle(`${mediaId}.json`, { create: false });
+    return JSON.parse(await (await fh.getFile()).text());
+  } catch (_) { return null; }
+}
+export async function deleteTranscript(projectId, mediaId) {
+  try { const d = await subDir(projectId, 'transcripts', false); await d.removeEntry(`${mediaId}.json`); } catch (_) {}
+}
+
 // ---- storage estimate (M6 uses this; expose now) -------------------------
 export async function storageEstimate() {
   try {

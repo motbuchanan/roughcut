@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.38 &middot; Oct 27</button>
+      <button id="badge" class="badge" title="Tap for version">v0.42 &middot; Oct 27</button>
     </header>
 
     <main>
@@ -24,11 +24,14 @@
       <section class="screen active" data-screen="list" id="screen-list">
         <div class="list-head">
           <h1>Projects</h1>
-          <button id="new-project" class="primary" style="margin-left:auto">+ New</button>
+          <button id="open-bundle" class="tlbtn wide" style="margin-left:auto" title="Open a saved RoughCut project file">Open file&hellip;</button>
+          <button id="new-project" class="primary">+ New</button>
+          <input type="file" id="bundle-input" accept=".zip,application/zip" hidden />
         </div>
         <div id="project-list"></div>
         <div id="empty-list" class="empty">No projects yet. Tap <b>+ New</b> to start a cut.</div>
         <div id="storage-meter" class="storage-meter" hidden><div class="sm-bar"><i id="sm-fill"></i></div><span id="sm-text" class="sm-text"></span></div>
+        <div class="models-row"><button id="models-btn" class="tlbtn wide">On-device models&hellip;</button><span id="models-sum" class="sm-text"></span></div>
       </section>
 
       <!-- EDITOR -->
@@ -67,8 +70,50 @@
             <button id="tl-text" class="tlbtn wide">+ Text</button>
             <button id="tl-title" class="tlbtn wide">+ Title</button>
             <span class="tl-sep"></span>
+            <button id="tl-auto" class="tlbtn wide" aria-pressed="false" title="Tighten dead air, find beats">Auto</button>
+            <span class="tl-sep"></span>
             <button id="tl-zoomout" class="tlbtn" aria-label="Zoom out">&minus;</button>
             <button id="tl-zoomin" class="tlbtn" aria-label="Zoom in">+</button>
+          </div>
+          <div class="text-sheet auto-sheet hidden" id="auto-sheet">
+            <div class="cs-row">
+              <span class="cs-label">Tighten</span>
+              <div class="seg" id="auto-pacing"></div>
+              <button id="auto-close" class="iconbtn small" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="cs-row">
+              <button id="auto-find" class="tlbtn wide grow">Find dead air</button>
+              <button id="auto-apply" class="primary grow hidden">Cut it</button>
+            </div>
+            <div class="ts-hint" id="auto-report">Cuts the silence between lines on the main track and leaves a breath at each join. One undo puts it all back.</div>
+            <div class="cs-row">
+              <span class="cs-label">Beats</span>
+              <button id="auto-beats" class="tlbtn wide grow">Find beats</button>
+              <button id="auto-snap" class="tlbtn wide" aria-pressed="false">Snap</button>
+              <button id="auto-prevb" class="tlbtn" aria-label="Previous beat">&#8249;&#9833;</button>
+              <button id="auto-nextb" class="tlbtn" aria-label="Next beat">&#9833;&#8250;</button>
+              <button id="auto-beats-clear" class="tlbtn hidden" aria-label="Clear beat markers">&times;</button>
+            </div>
+            <div class="ts-hint" id="auto-beats-info">Marks every beat of the selected music clip on the ruler. With Snap on, clip edges and moves land on the beat.</div>
+            <div class="cs-row">
+              <span class="cs-label">Captions</span>
+              <button id="auto-captions" class="tlbtn wide grow">Auto captions</button>
+              <div class="seg" id="auto-capmodel" aria-label="Caption model"></div>
+            </div>
+            <div class="cs-row">
+              <span class="cs-label"></span>
+              <button id="auto-fix" class="tlbtn wide grow" aria-pressed="false" title="Names and words it keeps getting wrong">Fix words&hellip;</button>
+              <button id="auto-cap-clear" class="tlbtn wide grow danger hidden">Clear captions</button>
+            </div>
+            <div class="cs-row hidden" id="auto-cap-progress">
+              <div class="prog grow"><i id="auto-cap-bar"></i></div>
+              <button id="auto-cap-cancel" class="tlbtn">Cancel</button>
+            </div>
+            <div class="cs-row hidden" id="auto-fix-row">
+              <textarea id="auto-fixes" class="ts-input" rows="3" placeholder="one per line:  yankee -> Yanke" autocomplete="off" spellcheck="false"></textarea>
+              <button id="auto-rebuild" class="tlbtn wide">Rebuild</button>
+            </div>
+            <div class="ts-hint" id="auto-cap-info">Listens to the talking on the main track and writes 2 to 3 word captions, timed to each word, on the text track. Edit any caption like text. Runs on this phone; nothing is uploaded.</div>
           </div>
           <div class="text-sheet hidden" id="text-sheet">
             <textarea id="ts-text" class="ts-input" rows="2" placeholder="Type your text" autocomplete="off"></textarea>
@@ -313,7 +358,33 @@
         <div class="swatches" id="set-bg"></div>
       </div>
       <div class="ex-summary" id="set-summary"></div>
+      <div class="ex-field">
+        <span class="ex-label">Project file</span>
+        <div class="seg">
+          <button id="set-bundle-save" aria-pressed="false">Save project file</button>
+          <button id="set-bundle-share" aria-pressed="false" class="hidden">Share project file</button>
+        </div>
+      </div>
+      <div class="ex-summary" id="set-bundle-note">One zip with the cut, every clip, and your LUTs. Open it on any device from the Projects screen, or unzip it anywhere.</div>
+      <div class="ex-field">
+        <span class="ex-label">AI features</span>
+        <div class="seg"><button id="set-models" aria-pressed="false">On-device models&hellip;</button></div>
+      </div>
       <button id="settings-done" class="primary block">Done</button>
+    </div>
+  </div>
+
+  <!-- ON-DEVICE MODELS OVERLAY (v0.41) -->
+  <div class="export-overlay hidden" id="models-overlay">
+    <div class="export-card">
+      <div class="export-head">
+        <span class="export-title">On-device models</span>
+        <button id="models-close" class="iconbtn" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="ex-summary">AI features like captions run on this phone. Each one needs a model file that downloads once (size shown), stays in RoughCut&rsquo;s own storage, and can be deleted here any time. Your video never leaves the phone: the model comes to it.</div>
+      <div id="models-list"></div>
+      <div class="ex-summary" id="models-note"></div>
+      <button id="models-done" class="primary block">Done</button>
     </div>
   </div>
 

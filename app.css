@@ -198,6 +198,7 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 .tl-track.has-audio .tl-tclip { top: 153px; }
+.tl-tclip.cap { border-color: rgba(76, 240, 224, .85); background: rgba(76, 240, 224, .16); }
 .tl-tclip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); z-index: 3; }
 .tl-tclip.lifting { z-index: 8; box-shadow: 0 8px 24px rgba(0,0,0,.6), 0 0 0 2px var(--accent); opacity: .92; transition: none; }
 .tl-tclip.trimming { transition: none; }
@@ -223,6 +224,18 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .tl-tick { position: absolute; top: 12px; width: 1px; height: 5px; background: var(--line); }
 .tl-tick.major { top: 8px; height: 9px; background: var(--muted); }
 .tl-tick.major::after { content: attr(data-t); position: absolute; left: 3px; top: -10px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* beat markers (v0.40): sit below the second ticks; downbeats taller and brighter */
+.tl-beat { position: absolute; top: 13px; width: 2px; height: 5px; margin-left: -1px; border-radius: 1px; background: rgba(255, 196, 64, 0.55); }
+.tl-beat.bar { top: 10px; height: 8px; background: rgba(255, 196, 64, 0.95); }
+.auto-sheet .cs-row { align-items: center; }
+.auto-sheet .cs-label { min-width: 54px; }
+.iconbtn.small { min-width: 36px; min-height: 36px; font-size: 14px; }
+.auto-sheet .primary { min-height: 36px; padding: 0 12px; border-radius: 8px; font-size: 13px; }
+.auto-sheet .grow { flex: 1 1 auto; }
+.auto-sheet .seg#auto-capmodel { flex: 0 0 auto; }
+.auto-sheet .seg#auto-capmodel button { min-width: 52px; padding: 0 8px; }
+.auto-sheet #auto-fixes { min-height: 64px; font-size: 13px; }
+.auto-sheet #auto-cap-progress .prog { height: 10px; }
 .tl-clip {
   position: absolute; top: 22px; height: 74px; box-sizing: border-box; touch-action: pan-x;
   border: 2px solid var(--vid); border-radius: 8px; background: #000;
@@ -370,6 +383,19 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .sm-bar { height: 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
 .sm-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
 .sm-text { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.models-row { display: flex; align-items: center; gap: 10px; margin: 12px 4px 4px; flex-wrap: wrap; }
+.models-row .sm-text { margin: 0; }
+/* on-device models overlay (v0.41) */
+.model { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); }
+.model-head { display: flex; align-items: center; gap: 8px; }
+.model-name { font-weight: 700; flex: 1 1 auto; min-width: 0; }
+.model-size { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.model-detail { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.model-act { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.model-act .prog { flex: 1 1 auto; }
+.model-state { font-size: 12px; color: var(--muted); flex: 1 1 auto; }
+.model-state.ok { color: var(--accent); }
+.model-state.bad { color: var(--danger); }
 
 /* ---- capability screen ---- */
 #screen-capability { padding: 24px; overflow: auto; align-items: center; justify-content: center; }

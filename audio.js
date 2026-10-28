@@ -67,14 +67,14 @@ export function voiceLevels(project, totalUs, getBuffer) {
   return out;
 }
 // Voice present per window: above a floor that adapts to how loud the recording is.
-export function voicePresence(levels) {
+export function voicePresence(levels, holdS = DUCK_HOLD_S) {
   const sorted = Array.from(levels).filter((v) => v > 0).sort((a, b) => a - b);
   const p90 = sorted.length ? sorted[Math.floor(sorted.length * 0.9)] : 0;
   const thr = Math.max(0.01, p90 * 0.2);   // 0.01 ~ -40 dBFS
   const pres = new Uint8Array(levels.length);
   for (let i = 0; i < levels.length; i++) pres[i] = levels[i] > thr ? 1 : 0;
   // hold through short gaps between words
-  const hold = Math.round(DUCK_HOLD_S / VOICE_WIN_S);
+  const hold = Math.round(holdS / VOICE_WIN_S);
   const out = new Uint8Array(levels.length);
   let last = -1e9;
   for (let i = 0; i < pres.length; i++) { if (pres[i]) last = i; out[i] = (i - last <= hold) ? 1 : 0; }
@@ -341,6 +341,9 @@ export class AudioEngine {
     }
   }
   forget(mediaId) { this.cache.delete(mediaId); }
+  // Public decode for analysis passes (tighten, beats): same cache as playback.
+  decode(project, media) { return this._decode(project, media); }
+  buffer(mediaId) { const e = this.cache.get(mediaId); return e ? e.buffer : null; }
 
   // Every clip that will make sound at or after fromUs, on both lanes.
   _audible(project, fromUs, totalUs) {

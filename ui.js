@@ -10,7 +10,8 @@ import { importFile } from './media.js';
 import { frameOf, isDefaultFrame, clampPan, ZOOM_MIN, ZOOM_MAX } from './frame.js';
 import { DUCK, DUCK_LABELS, duckOf, envAt, hasEnv } from './audio.js';
 import { PRESETS, lookOf, presetValues, parseCube, registerLut } from './color.js';
-import { writeLut, uid } from './state.js';
+import { writeLut, uid, saveProjectNow } from './state.js';
+import { exportBundle, importBundle, bundleName } from './bundle.js';
 import { Preview } from './preview.js';
 import {
   CommandBus, addClipCmd, addAudioCmd, setClipAudioCmd, detachAudioCmd, findClip, laneOf, clipDurUs, trimClipCmd, trimAudioCmd, tlToSrcUs, MIN_CLIP_US,
@@ -24,7 +25,12 @@ import {
   FONTS, SIZES, COLORS, ANIMS, TEXT_DEFAULT_US,
 } from './text.js';
 import { exportProject, canExport } from './export.js';
-import { AudioEngine } from './audio.js';
+import { AudioEngine, voiceClips } from './audio.js';
+import { PACING, PACING_ORDER, planTighten, tightenCmd, fmtSec } from './tighten.js';
+import { analyzeBeats, beatsToUs, allBeatTlUs, nearestBeat } from './beats.js';
+import { MODELS, modelById, allStatus, closure, bytesToGet, downloadModel, deleteModel, installedBytes, fmtMB, captionModels, modelStatus as modelStatusOf } from './models.js';
+import { buildCaptionItems, setCaptionsCmd, retimeCaptions, captionCount, captionItems, parseFixes, fixesToText, fmtClock } from './captions.js';
+import { readTranscript, writeTranscript } from './state.js';
 import { extractAudio, probeAudioCodec, copyPlanFor, canMakeM4a, baseName, fmtBytes } from './extract.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -80,6 +86,7 @@ export function renderList() {
     wrap.appendChild(card);
   }
   renderStorageMeter();
+  renderModelsSummary();
 }
 async function renderStorageMeter() {
   const el = els.storageMeter; if (!el) return;
@@ -94,6 +101,83 @@ async function renderStorageMeter() {
     el.hidden = false;
   } catch (_) { el.hidden = true; }
 }
+// ---- on-device models (v0.41) ----
+const modelJobs = new Map();   // id -> { ctrl, done, total, file, error }
+let modelStatus = {};
+async function renderModelsSummary() {
+  if (!els.modelsSum) return;
+  try { const n = await installedBytes(); els.modelsSum.textContent = n ? `${fmtMB(n)} of models on this phone` : 'None downloaded yet'; } catch (_) { els.modelsSum.textContent = ''; }
+}
+async function openModels() {
+  els.modelsOverlay.classList.remove('hidden');
+  await refreshModels();
+}
+function closeModels() { els.modelsOverlay.classList.add('hidden'); renderModelsSummary(); renderStorageMeter(); }
+async function refreshModels() {
+  try { modelStatus = await allStatus(); } catch (e) { modelStatus = {}; }
+  renderModels();
+}
+function renderModels() {
+  const root = els.modelsList; root.innerHTML = '';
+  for (const m of MODELS) {
+    const st = modelStatus[m.id] || { installed: false, bytes: m.bytes };
+    const job = modelJobs.get(m.id);
+    const card = document.createElement('div'); card.className = 'model'; card.dataset.id = m.id;
+    const extra = (!st.installed && !job) ? bytesToGet(m.id, modelStatus) - m.bytes : 0;   // deps still to fetch
+    card.innerHTML = `<div class="model-head"><span class="model-name"></span><span class="model-size"></span></div><div class="model-detail"></div><div class="model-act"></div>`;
+    card.querySelector('.model-name').textContent = m.label;
+    card.querySelector('.model-size').textContent = st.installed ? fmtMB(st.bytes) + ' on phone' : '~' + fmtMB(m.bytes) + (extra > 0 ? ' + ' + fmtMB(extra) + ' engine' : '');
+    card.querySelector('.model-detail').textContent = m.detail + ' · ' + m.license + ' · ' + m.source;
+    const act = card.querySelector('.model-act');
+    if (job && !job.error) {
+      const pct = job.total ? Math.min(100, Math.round(job.done / job.total * 100)) : 0;
+      act.innerHTML = `<div class="prog"><i style="width:${pct}%"></i></div><span class="model-state"></span><button class="tlbtn" data-act="cancel">Cancel</button>`;
+      act.querySelector('.model-state').textContent = `${fmtMB(job.done)} / ${fmtMB(job.total)}${job.file ? ' · ' + job.file.split('/').pop() : ''}`;
+    } else if (st.installed) {
+      act.innerHTML = `<span class="model-state ok">Ready · stays on this phone</span><button class="tlbtn danger" data-act="delete">Delete</button>`;
+    } else {
+      act.innerHTML = `<span class="model-state"></span><button class="tlbtn wide" data-act="get">Download</button>`;
+      const stt = act.querySelector('.model-state');
+      if (job && job.error) { stt.textContent = job.error; stt.classList.add('bad'); }
+      else stt.textContent = st.stale ? 'Update available' : (navigator.onLine ? 'Not on this phone' : 'Needs a connection to download');
+    }
+    root.appendChild(card);
+  }
+  const anyJob = [...modelJobs.values()].some((j) => !j.error);
+  els.modelsNote.textContent = anyJob ? 'Keep RoughCut open while it downloads. You can keep editing; come back here to check.' : 'Downloads come from huggingface.co and jsDelivr once. After that, captions work offline.';
+}
+async function getModel(id) {
+  const list = closure(id).filter((m) => !(modelStatus[m.id] && modelStatus[m.id].installed) && !modelJobs.has(m.id));
+  for (const m of list) {
+    const ctrl = new AbortController();
+    const job = { ctrl, done: 0, total: m.bytes, file: '', error: null };
+    modelJobs.set(m.id, job); renderModels();
+    try {
+      await downloadModel(m.id, (p) => { job.done = p.done; job.total = Math.max(p.total, p.done); job.file = p.file; const el = els.modelsList.querySelector(`.model[data-id="${m.id}"] .prog i`); if (el) el.style.width = Math.min(100, Math.round(job.done / job.total * 100)) + '%'; const stt = els.modelsList.querySelector(`.model[data-id="${m.id}"] .model-state`); if (stt) stt.textContent = `${fmtMB(job.done)} / ${fmtMB(job.total)} · ${p.file.split('/').pop()}`; }, ctrl.signal);
+      modelJobs.delete(m.id);
+      toast(`${m.label} is on this phone`, 2200);
+    } catch (e) {
+      if (e && e.name === 'AbortError') { modelJobs.delete(m.id); try { await deleteModel(m.id); } catch (_) {} }
+      else { job.error = (e && e.message) ? e.message : 'Download failed'; try { await deleteModel(m.id); } catch (_) {} }
+      await refreshModels();
+      return;
+    }
+    await refreshModels();
+  }
+}
+async function onModelsClick(e) {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const id = b.closest('.model').dataset.id; const act = b.dataset.act;
+  if (act === 'get') { modelJobs.delete(id); getModel(id); }
+  else if (act === 'cancel') { const j = modelJobs.get(id); if (j) j.ctrl.abort(); }
+  else if (act === 'delete') {
+    const m = modelById(id);
+    const users = MODELS.filter((x) => (x.needs || []).includes(id) && modelStatus[x.id] && modelStatus[x.id].installed);
+    if (!confirm(`Delete ${m.label} from this phone?${users.length ? ' The captions models need it; you can download it again any time.' : ''}`)) return;
+    await deleteModel(id); await refreshModels(); toast('Deleted', 1400);
+  }
+}
+
 async function newProjectFlow() {
   const name = prompt('Project name', 'Untitled'); if (name == null) return;
   const prefs = loadPrefs();
@@ -165,6 +249,10 @@ async function openEditor(id) {
     toast,
   });
 
+  autoPacing = PACING[loadPrefs().pacing] ? loadPrefs().pacing : 'balanced';
+  autoPlan = null;
+  view.snapBeats = !!loadPrefs().snapBeats;
+  openAuto(false);
   renderMediaStrip();
   view.render();
   onPlayheadMoved(0);
@@ -174,6 +262,7 @@ async function openEditor(id) {
 }
 async function closeEditor() {
   pausePlay();
+  if (capJob) cancelCaptions();
   commitTyping();
   closePull();
   closeExport();
@@ -189,10 +278,12 @@ async function closeEditor() {
 
 function onBusChange() {
   pausePlay();
+  if (current) retimeCaptions(current);   // v0.42: captions follow their clip through every cut, trim and speed change
   view.render();
   view.setPlayhead(view.playheadUs);   // reclamp to (possibly new) total, refresh preview
   updateToolbar();
   renderSheet();
+  if (!els.autoSheet.classList.contains('hidden')) { autoPlan = null; renderAuto(); }
   scheduleSave(current);
 }
 
@@ -436,6 +527,252 @@ function pickDuck(d) {
   const c = selectedClip(); if (!c || duckOf(c) === d) return;
   bus.do(setClipAudioCmd(current, c.id, { duck: d === 'off' ? undefined : d }));
   if (d !== 'off') toast('Music drops under the voice on the video track and comes back in the gaps', 2600);
+}
+
+// ---- Auto sheet (v0.40): tighten dead air + beat markers ----
+let autoPlan = null, autoPacing = 'balanced', autoBusy = false;
+function openAuto(show) {
+  const on = show == null ? els.autoSheet.classList.contains('hidden') : show;
+  els.autoSheet.classList.toggle('hidden', !on);
+  els.tlAuto.setAttribute('aria-pressed', String(on));
+  if (on) { autoPlan = null; renderAuto(); }
+}
+function renderAuto() {
+  if (!current) return;
+  if (!els.autoPacing.childElementCount) {
+    for (const k of PACING_ORDER) { const b = document.createElement('button'); b.dataset.k = k; b.textContent = PACING[k].label; els.autoPacing.appendChild(b); }
+  }
+  els.autoPacing.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === autoPacing)));
+  els.autoApply.classList.toggle('hidden', !(autoPlan && autoPlan.removals.length));
+  els.autoFind.disabled = autoBusy; els.autoBeats.disabled = autoBusy;
+  if (!autoPlan) els.autoReport.textContent = 'Cuts the silence between lines on the main track and leaves a breath at each join. One undo puts it all back.';
+  const snap = !!loadPrefs().snapBeats;
+  els.autoSnap.setAttribute('aria-pressed', String(snap));
+  if (view) view.snapBeats = snap;
+  const beats = allBeatTlUs(current);
+  const withBeats = current.tracks.flatMap((t) => t.clips || []).filter((c) => c.beats);
+  els.autoBeatsClear.classList.toggle('hidden', !withBeats.length);
+  els.autoPrevB.disabled = !beats.length; els.autoNextB.disabled = !beats.length;
+  if (withBeats.length) {
+    const c = withBeats[0];
+    const m = current.media.find((x) => x.id === c.mediaId);
+    els.autoBeatsInfo.textContent = `${c.beats.bpm ? Math.round(c.beats.bpm) + ' BPM · ' : ''}${beats.length} beats on ${(m && m.name) ? m.name.replace(/\.[^.]+$/, '') : 'the music'}${withBeats.length > 1 ? ' +' + (withBeats.length - 1) + ' more' : ''}. Tap ‹♩ ♩› to step the playhead between them.`;
+  } else els.autoBeatsInfo.textContent = 'Marks every beat of the selected music clip on the ruler. With Snap on, clip edges and moves land on the beat.';
+  renderCaptionsRow();
+}
+function pickPacing(k) { if (!PACING[k]) return; autoPacing = k; autoPlan = null; savePrefs({ ...loadPrefs(), pacing: k }); renderAuto(); }
+async function findDeadAir() {
+  if (!current || autoBusy) return;
+  pausePlay();
+  const vc = voiceClips(current);
+  if (!vc.length) { toast('No clip with sound on the timeline', 2000); return; }
+  autoBusy = true; renderAuto();
+  els.autoReport.textContent = 'Listening\u2026';
+  try {
+    for (const c of vc) { const m = current.media.find((x) => x.id === c.mediaId); if (m) await engine.decode(current, m); }
+    const plan = planTighten(current, totalUs(current), (id) => engine.buffer(id), autoPacing);
+    autoPlan = plan;
+    if (plan.noVoice) els.autoReport.textContent = 'No speech found. Tighten listens for talking on the main track; music alone has no dead air to cut.';
+    else if (!plan.removals.length) els.autoReport.textContent = `Nothing to cut at ${PACING[autoPacing].label}: no pause longer than ${PACING[autoPacing].minGap.toFixed(2)} s.`;
+    else {
+      const pct = Math.round(plan.fraction * 100);
+      els.autoReport.textContent = `${plan.removals.length} cut${plan.removals.length === 1 ? '' : 's'}, ${fmtSec(plan.removedUs)} of ${fmtSec(plan.totalUs)} removed (${pct}%).`
+        + (plan.heavy ? ' That is a lot: check the result, or try Restrained.' : '');
+    }
+  } catch (e) { console.error(e); autoPlan = null; els.autoReport.textContent = 'Could not read the audio: ' + (e && e.message ? e.message : e); }
+  autoBusy = false; renderAuto();
+}
+function applyTighten() {
+  if (!current || !autoPlan || !autoPlan.removals.length) return;
+  pausePlay();
+  const n = bus.do(tightenCmd(current, autoPlan));
+  toast(`${n} cut${n === 1 ? '' : 's'} made. Undo brings it all back.`, 2400);
+  autoPlan = null; renderAuto();
+}
+function beatTarget() {
+  const sel = selectedClip();
+  if (sel) { const m = current.media.find((x) => x.id === sel.mediaId); const lane = laneOf(current, sel.id); if (m && (lane === 'a' || (lane === 'v' && m.hasAudio))) return sel; }
+  const at = current.tracks.find((t) => t.id === 'a1');
+  return at && at.clips.length ? at.clips[0] : null;
+}
+async function findBeats() {
+  if (!current || autoBusy) return;
+  pausePlay();
+  const c = beatTarget();
+  if (!c) { toast('Add a music clip first, or select a clip with sound', 2200); return; }
+  const m = current.media.find((x) => x.id === c.mediaId);
+  autoBusy = true; renderAuto();
+  els.autoBeatsInfo.textContent = 'Listening for the beat\u2026';
+  try {
+    const buf = await engine.decode(current, m);
+    const r = analyzeBeats(buf);
+    if (!r.beats.length) { els.autoBeatsInfo.textContent = 'No steady beat found in that clip.'; }
+    else {
+      bus.do(setClipAudioCmd(current, c.id, { beats: { bpm: r.bpm, srcUs: beatsToUs(r.beats) } }, 'Beat markers'));
+      if (!loadPrefs().snapBeats) { savePrefs({ ...loadPrefs(), snapBeats: true }); }
+    }
+  } catch (e) { console.error(e); els.autoBeatsInfo.textContent = 'Could not read the audio: ' + (e && e.message ? e.message : e); }
+  autoBusy = false; renderAuto();
+}
+function clearBeats() {
+  if (!current) return;
+  const withBeats = current.tracks.flatMap((t) => t.clips || []).filter((c) => c.beats);
+  for (const c of withBeats) bus.do(setClipAudioCmd(current, c.id, { beats: undefined }, 'Clear beats'));
+  renderAuto();
+}
+function toggleSnap() { const p = loadPrefs(); savePrefs({ ...p, snapBeats: !p.snapBeats }); renderAuto(); }
+function stepBeat(dir) {
+  if (!current) return;
+  pausePlay();
+  const b = nearestBeat(allBeatTlUs(current), view.playheadUs, dir);
+  if (b == null) { toast(dir > 0 ? 'No beat after here' : 'No beat before here', 1400); return; }
+  view.setPlayhead(b, true);
+}
+
+// ---- auto captions (v0.42) ----
+let capWorker = null, capJob = null;   // capJob: { cancelled, mediaName, i, n }
+function captionModelId() { const p = loadPrefs(); return captionModels().some((m) => m.id === p.captionModel) ? p.captionModel : 'whisper-tiny-en'; }
+function renderCaptionsRow() {
+  if (!current) return;
+  if (!els.autoCapModel.childElementCount) {
+    for (const m of captionModels()) { const b = document.createElement('button'); b.dataset.k = m.id; b.textContent = m.id === 'whisper-base-en' ? 'Better' : 'Small'; b.title = m.label; els.autoCapModel.appendChild(b); }
+  }
+  const mid = captionModelId();
+  els.autoCapModel.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === mid)));
+  const n = captionCount(current);
+  els.autoCapClear.classList.toggle('hidden', !captionItems(current).length);
+  els.autoCaptions.disabled = !!capJob;
+  els.autoCapProgress.classList.toggle('hidden', !capJob);
+  els.autoFix.setAttribute('aria-pressed', String(!els.autoFixRow.classList.contains('hidden')));
+  if (!capJob) {
+    if (n) els.autoCapInfo.textContent = `${n} caption${n === 1 ? '' : 's'} on the text track. Tap one to edit the words; they follow the cut. Auto captions again after re-cutting a clip, or Rebuild after fixing words.`;
+    else els.autoCapInfo.textContent = 'Listens to the talking on the main track and writes 2 to 3 word captions, timed to each word, on the text track. Edit any caption like text. Runs on this phone; nothing is uploaded.';
+  }
+}
+function pickCaptionModel(k) { savePrefs({ ...loadPrefs(), captionModel: k }); renderCaptionsRow(); }
+function toggleFixRow() {
+  const show = els.autoFixRow.classList.contains('hidden');
+  els.autoFixRow.classList.toggle('hidden', !show);
+  if (show) { els.autoFixes.value = fixesToText(current.captionFixes || []); }
+  renderCaptionsRow();
+}
+function commitFixes() {
+  if (!current) return;
+  const fixes = parseFixes(els.autoFixes.value);
+  current.captionFixes = fixes.length ? fixes : undefined;
+  scheduleSave(current);
+}
+// Mono 16 kHz samples for Whisper.
+async function toMono16k(buffer) {
+  const sr = 16000, len = Math.max(1, Math.ceil(buffer.duration * sr));
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const oc = new OAC(1, len, sr);
+  const src = oc.createBufferSource(); src.buffer = buffer; src.connect(oc.destination); src.start();
+  const out = await oc.startRendering();
+  return out.getChannelData(0);
+}
+function ensureCapWorker() {
+  if (capWorker) return capWorker;
+  capWorker = new Worker('captions-worker.js', { type: 'module' });
+  return capWorker;
+}
+function killCapWorker() { if (capWorker) { capWorker.terminate(); capWorker = null; } }
+function capStatus(text, p) {
+  els.autoCapInfo.textContent = text;
+  if (p != null) els.autoCapBar.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%';
+}
+// Run the worker over one source. Resolves { words, text, approx }.
+function transcribeWithWorker(modelId, audio, label, onStage) {
+  return new Promise((resolve, reject) => {
+    const w = ensureCapWorker();
+    const jobId = uid('cap');
+    const onMsg = (e) => {
+      const m = e.data || {};
+      if (m.jobId !== jobId) return;
+      if (m.type === 'status') onStage(m.stage, m.p);
+      else if (m.type === 'done') { w.removeEventListener('message', onMsg); resolve(m); }
+      else if (m.type === 'error') { w.removeEventListener('message', onMsg); reject(new Error(m.message || 'Captions failed')); }
+    };
+    w.addEventListener('message', onMsg);
+    w.addEventListener('error', (ev) => reject(new Error(ev.message || 'Caption worker failed')), { once: true });
+    w.postMessage({ type: 'run', jobId, modelId, audio, opts: { language: 'en' } }, [audio.buffer]);
+  });
+}
+async function autoCaptions() {
+  if (!current || capJob) return;
+  pausePlay();
+  const media = (id) => current.media.find((m) => m.id === id) || null;
+  const talking = mainTrack(current).clips.filter((c) => { const m = media(c.mediaId); return m && m.hasAudio && !c.muted; });
+  if (!talking.length) { toast('No clip with sound on the main track', 2000); return; }
+  const modelId = captionModelId();
+  const mstat = await modelStatusOf(modelId);
+  const estat = await modelStatusOf('caption-engine');
+  if (!mstat.installed || !estat.installed) {
+    toast(`Download ${modelById(modelId).label} first`, 2600);
+    openModels();
+    return;
+  }
+  commitFixes();
+  const ids = [...new Set(talking.map((c) => c.mediaId))];
+  capJob = { cancelled: false };
+  renderCaptionsRow();
+  const transcripts = new Map();
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      const m = media(ids[i]);
+      const name = (m.name || 'clip').replace(/\.[^.]+$/, '');
+      const which = ids.length > 1 ? ` (${i + 1} of ${ids.length})` : '';
+      const cached = await readTranscript(current.id, m.id);
+      if (cached && cached.words && cached.model === modelId) { transcripts.set(m.id, cached); capStatus(`${name}: using the transcript from last time${which}`, 1); continue; }
+      capStatus(`Reading ${name}${which}\u2026`, 0);
+      const buf = await engine.decode(current, m);
+      if (capJob.cancelled) break;
+      const audio = await toMono16k(buf);
+      if (capJob.cancelled) break;
+      const total = buf.duration;
+      const r = await transcribeWithWorker(modelId, audio, name, (stage, p) => {
+        if (stage === 'engine') capStatus(`Starting the caption engine${which}\u2026`, 0.02);
+        else if (stage === 'model') capStatus(`Loading ${modelById(modelId).label}${which}\u2026 ${Math.round(p * 100)}%`, 0.02 + p * 0.1);
+        else capStatus(`Listening to ${name}${which}\u2026 ${fmtClock(p * total)} of ${fmtClock(total)}`, 0.12 + p * 0.88);
+      });
+      if (capJob.cancelled) break;
+      const tr = { model: modelId, words: r.words, text: r.text, approx: !!r.approx, made: Date.now(), durS: total };
+      transcripts.set(m.id, tr);
+      try { await writeTranscript(current.id, m.id, tr); } catch (e) { console.warn('transcript not saved', e); }
+    }
+    if (!capJob.cancelled) {
+      const items = buildCaptionItems(current, transcripts, current.captionFixes || []);
+      const n = bus.do(setCaptionsCmd(current, items, [...transcripts.keys()]));
+      const noWords = [...transcripts.values()].every((t) => !t.words.length);
+      if (noWords) toast('No speech found in those clips', 2400);
+      else toast(`${n} caption${n === 1 ? '' : 's'} placed. Tap any to edit.`, 2600);
+      if ([...transcripts.values()].some((t) => t.approx)) toast('This model gave sentence timing only; caption timing is approximate', 3200);
+    }
+  } catch (e) {
+    console.error(e);
+    toast('Captions failed: ' + (e && e.message ? e.message : e), 4000);
+  } finally {
+    killCapWorker();
+    capJob = null;
+    renderCaptionsRow();
+  }
+}
+function cancelCaptions() { if (!capJob) return; capJob.cancelled = true; killCapWorker(); capJob = null; toast('Captions cancelled', 1400); renderCaptionsRow(); }
+async function rebuildCaptions() {
+  if (!current || capJob) return;
+  commitFixes();
+  const ids = [...new Set(mainTrack(current).clips.map((c) => c.mediaId))];
+  const transcripts = new Map();
+  for (const id of ids) { const tr = await readTranscript(current.id, id); if (tr && tr.words) transcripts.set(id, tr); }
+  if (!transcripts.size) { toast('Nothing to rebuild yet: run Auto captions first', 2200); return; }
+  const items = buildCaptionItems(current, transcripts, current.captionFixes || []);
+  const n = bus.do(setCaptionsCmd(current, items, [...transcripts.keys()]));
+  toast(`${n} caption${n === 1 ? '' : 's'} rebuilt`, 1800);
+}
+function clearCaptions() {
+  if (!current || !captionItems(current).length) return;
+  bus.do(setCaptionsCmd(current, [], null));
+  toast('Captions removed. Undo brings them back.', 2000);
 }
 
 // ---- frame-step trimming (v0.37): one project frame at a time, or snap an edge to the playhead ----
@@ -971,6 +1308,50 @@ function openSettings() {
   els.settingsOverlay.classList.remove('hidden');
 }
 function closeSettings() { els.settingsOverlay.classList.add('hidden'); }
+
+// ---- project file (v0.39): the whole project as one zip, and back again ----
+let bundleBusy = false;
+async function buildBundle() {
+  if (!current || bundleBusy) return null;
+  bundleBusy = true;
+  await flushSave();
+  els.setBundleSave.disabled = true; els.setBundleShare.disabled = true;
+  try {
+    const blob = await exportBundle(current, (p) => { els.setBundleNote.textContent = `Packing\u2026 ${Math.round(p * 100)}%`; });
+    els.setBundleNote.textContent = `Ready: ${bundleName(current)} \u00b7 ${fmtBytes(blob.size)}`;
+    return blob;
+  } catch (e) {
+    els.setBundleNote.textContent = 'Could not pack the project: ' + (e && e.message ? e.message : e);
+    return null;
+  } finally { bundleBusy = false; els.setBundleSave.disabled = false; els.setBundleShare.disabled = false; }
+}
+async function saveBundle() {
+  const blob = await buildBundle(); if (!blob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = bundleName(current);
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (_) {} }, 60000);
+  toast('Project file saved to Downloads', 2200);
+}
+async function shareBundle() {
+  const blob = await buildBundle(); if (!blob) return;
+  const f = new File([blob], bundleName(current), { type: 'application/zip' });
+  try { await navigator.share({ files: [f], title: bundleName(current) }); }
+  catch (e) { if (!(e && e.name === 'AbortError')) toast('Share did not work here; use Save instead', 2600); }
+}
+async function onBundlePicked(fileList) {
+  const file = fileList && fileList[0]; if (!file) return;
+  toast('Opening project file\u2026', 3000);
+  try {
+    const { project, missing } = await importBundle(file, (p) => { if (p < 1) toast(`Opening project file\u2026 ${Math.round(p * 100)}%`, 1500); });
+    normalize(project);
+    await saveProjectNow(project);
+    renderList();
+    if (missing.length) toast(`Opened, but ${missing.length} clip${missing.length > 1 ? 's were' : ' was'} not in the file: ${missing.slice(0, 3).join(', ')}`, 5000);
+    else toast(`Opened \u201c${project.name}\u201d`, 2200);
+    await openEditor(project.id);
+  } catch (e) { toast('Could not open that file: ' + (e && e.message ? e.message : e), 5000); }
+}
 function renderSettings() {
   const cur = current.canvas;
   const keys = Object.keys(CANVAS_PRESETS);
@@ -1102,6 +1483,7 @@ export function initUI() {
     toast: $('#toast'),
     projectList: $('#project-list'), emptyList: $('#empty-list'), newBtn: $('#new-project'),
     storageMeter: $('#storage-meter'), smFill: $('#sm-fill'), smText: $('#sm-text'),
+    modelsBtn: $('#models-btn'), modelsSum: $('#models-sum'), setModels: $('#set-models'), modelsOverlay: $('#models-overlay'), modelsClose: $('#models-close'), modelsDone: $('#models-done'), modelsList: $('#models-list'), modelsNote: $('#models-note'),
     capReasons: $('#cap-reasons'),
     editorTitle: $('#editor-title'), canvasBadge: $('#canvas-badge'), backBtn: $('#editor-back'),
     preview: $('#preview'), previewHint: $('#preview-hint'),
@@ -1129,7 +1511,11 @@ export function initUI() {
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
     pullSave: $('#pull-save'), pullShare: $('#pull-share'), pullAdd: $('#pull-add'),
-    tlText: $('#tl-text'), tlTitle: $('#tl-title'),
+    tlText: $('#tl-text'), tlTitle: $('#tl-title'), tlAuto: $('#tl-auto'),
+    autoSheet: $('#auto-sheet'), autoClose: $('#auto-close'), autoPacing: $('#auto-pacing'), autoFind: $('#auto-find'), autoApply: $('#auto-apply'), autoReport: $('#auto-report'),
+    autoBeats: $('#auto-beats'), autoSnap: $('#auto-snap'), autoPrevB: $('#auto-prevb'), autoNextB: $('#auto-nextb'), autoBeatsClear: $('#auto-beats-clear'), autoBeatsInfo: $('#auto-beats-info'),
+    autoCaptions: $('#auto-captions'), autoCapModel: $('#auto-capmodel'), autoFix: $('#auto-fix'), autoCapClear: $('#auto-cap-clear'), autoCapProgress: $('#auto-cap-progress'), autoCapBar: $('#auto-cap-bar'), autoCapCancel: $('#auto-cap-cancel'),
+    autoFixRow: $('#auto-fix-row'), autoFixes: $('#auto-fixes'), autoRebuild: $('#auto-rebuild'), autoCapInfo: $('#auto-cap-info'),
     textSheet: $('#text-sheet'), tsText: $('#ts-text'), tsSize: $('#ts-size'), tsFont: $('#ts-font'), tsAlign: $('#ts-align'),
     tsBg: $('#ts-bg'), tsBold: $('#ts-bold'), tsColors: $('#ts-colors'), tsDup: $('#ts-dup'), tsRange: $('#ts-range'),
     tsAnim: $('#ts-anim'), tsOutline: $('#ts-outline'), tsGlow: $('#ts-glow'),
@@ -1139,6 +1525,7 @@ export function initUI() {
     exportRun: $('#export-run'), exBar: $('#ex-bar'), exStatus: $('#ex-status'), exportCancel: $('#export-cancel'),
     exPlayer: $('#ex-player'), exDone: $('#ex-done'), exAudio: $('#ex-audio'), exSave: $('#ex-save'), exShare: $('#ex-share'), exAgain: $('#ex-again'),
     settingsBtn: $('#settings-btn'), settingsOverlay: $('#settings-overlay'), settingsClose: $('#settings-close'), settingsDone: $('#settings-done'),
+    setBundleSave: $('#set-bundle-save'), setBundleShare: $('#set-bundle-share'), setBundleNote: $('#set-bundle-note'), openBundle: $('#open-bundle'), bundleInput: $('#bundle-input'),
     setAspect: $('#set-aspect'), setBg: $('#set-bg'), setSummary: $('#set-summary'),
   };
   // build segmented controls + swatches once
@@ -1189,6 +1576,11 @@ export function initUI() {
 
 
   els.newBtn.addEventListener('click', newProjectFlow);
+  els.openBundle.addEventListener('click', () => els.bundleInput.click());
+  els.bundleInput.addEventListener('change', (e) => { onBundlePicked(e.target.files); e.target.value = ''; });
+  els.setBundleSave.addEventListener('click', saveBundle);
+  els.setBundleShare.addEventListener('click', shareBundle);
+  try { if (navigator.canShare && navigator.canShare({ files: [new File([new Blob(['x'])], 'x.zip', { type: 'application/zip' })] })) els.setBundleShare.classList.remove('hidden'); } catch (_) {}
   els.projectList.addEventListener('click', onListClick);
   els.backBtn.addEventListener('click', closeEditor);
   els.importBtn.addEventListener('click', () => els.fileInput.click());
@@ -1227,6 +1619,23 @@ export function initUI() {
 
   els.tlText.addEventListener('click', addTextAtPlayhead);
   els.tlTitle.addEventListener('click', addTitleCard);
+  els.tlAuto.addEventListener('click', () => openAuto());
+  els.autoClose.addEventListener('click', () => openAuto(false));
+  els.autoPacing.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickPacing(b.dataset.k); });
+  els.autoFind.addEventListener('click', findDeadAir);
+  els.autoApply.addEventListener('click', applyTighten);
+  els.autoBeats.addEventListener('click', findBeats);
+  els.autoSnap.addEventListener('click', toggleSnap);
+  els.autoPrevB.addEventListener('click', () => stepBeat(-1));
+  els.autoNextB.addEventListener('click', () => stepBeat(1));
+  els.autoBeatsClear.addEventListener('click', clearBeats);
+  els.autoCaptions.addEventListener('click', autoCaptions);
+  els.autoCapModel.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickCaptionModel(b.dataset.k); });
+  els.autoFix.addEventListener('click', toggleFixRow);
+  els.autoFixes.addEventListener('change', commitFixes);
+  els.autoRebuild.addEventListener('click', rebuildCaptions);
+  els.autoCapClear.addEventListener('click', clearCaptions);
+  els.autoCapCancel.addEventListener('click', cancelCaptions);
   els.tsText.addEventListener('focus', onTextFocus);
   els.tsText.addEventListener('input', onTextInput);
   els.tsText.addEventListener('blur', commitTyping);
@@ -1262,6 +1671,12 @@ export function initUI() {
     toast(`Audio ${state}. This device can encode: ${(a.encodable && a.encodable.length) ? a.encodable.join(', ') : 'not checked'}`, 7000);
   });
   els.settingsBtn.addEventListener('click', openSettings);
+  els.modelsBtn.addEventListener('click', openModels);
+  els.setModels.addEventListener('click', () => { closeSettings(); openModels(); });
+  els.modelsClose.addEventListener('click', closeModels);
+  els.modelsDone.addEventListener('click', closeModels);
+  els.modelsList.addEventListener('click', onModelsClick);
+  renderModelsSummary();
   els.settingsClose.addEventListener('click', closeSettings);
   els.settingsDone.addEventListener('click', closeSettings);
   els.setAspect.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setAspect(b.dataset.k); });

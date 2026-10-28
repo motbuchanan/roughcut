@@ -6,6 +6,7 @@
 import { US, uid, usToS, sToUs, clipDurUs, clipSpeed, tlToSrcUs, SPEEDS } from './state.js';
 export { clipDurUs, clipSpeed, tlToSrcUs, SPEEDS };
 import { textTrack, textDurUs, removeTextCmd, setTextCmd, TEXT_MIN_US } from './text.js';
+import { allBeatTlUs } from './beats.js';
 
 export const DEFAULT_IMAGE_US = 5 * US;   // an image clip's default length
 export const MIN_CLIP_US = 100_000;       // 0.1s floor so clips never vanish
@@ -160,10 +161,10 @@ export function detachAudioCmd(project, clipId, media) {
   };
 }
 // Works on either lane: gain / muted / fadeInUs / fadeOutUs.
-export function setClipAudioCmd(project, clipId, props) {
+export function setClipAudioCmd(project, clipId, props, label = 'Audio settings') {
   let old = null;
   return {
-    label: 'Audio settings',
+    label,
     do() { const c = findClip(project, clipId); if (!c) return; old = {}; for (const k of Object.keys(props)) old[k] = c[k]; Object.assign(c, props); },
     undo() { const c = findClip(project, clipId); if (!c || !old) return; for (const k of Object.keys(old)) { if (old[k] === undefined) delete c[k]; else c[k] = old[k]; } },
   };
@@ -413,18 +414,33 @@ export class TimelineView {
     for (const c of t.clips) { acc += clipDurUs(c); bs.push(acc); }
     return bs;
   }
+  // Snap targets: cut points, plus beat markers when beat snapping is on (v0.40).
+  _snapPoints() {
+    const bs = this._boundaries();
+    if (!this.snapBeats) return bs;
+    return bs.concat(allBeatTlUs(this.project));
+  }
   _nearestBoundary(us) {
     let best = null, bestD = Infinity;
-    for (const b of this._boundaries()) {
+    for (const b of this._snapPoints()) {
       const d = Math.abs(this._usToPx(us) - this._usToPx(b));
       if (d < bestD) { bestD = d; best = b; }
     }
     return { us: best, px: bestD };
   }
   _snapStart(us) {
-    for (const b of this._boundaries()) if (Math.abs(this._usToPx(us) - this._usToPx(b)) <= SNAP_PX) return b;
+    for (const b of this._snapPoints()) if (Math.abs(this._usToPx(us) - this._usToPx(b)) <= SNAP_PX) return b;
     if (Math.abs(this._usToPx(us) - this._usToPx(this.playheadUs)) <= SNAP_PX) return this.playheadUs;
     return us;
+  }
+  // nearest beat marker within SNAP_PX of a timeline time, ignoring the clip's own markers
+  _nearBeat(us, skipClipId) {
+    let best = null, bd = SNAP_PX + 0.001;
+    for (const t of this.project.tracks) for (const c of (t.clips || [])) {
+      if (!c.beats || c.id === skipClipId) continue;
+      for (const b of allBeatTlUs({ tracks: [{ clips: [c] }] })) { const d = Math.abs(this._usToPx(us) - this._usToPx(b)); if (d < bd) { bd = d; best = b; } }
+    }
+    return best;
   }
   // strip x (relative to trackEl) for a timeline time
   _tlX(us) { return this._padPx + this._usToPx(us); }
@@ -537,8 +553,10 @@ export class TimelineView {
       const el = this._tels.get(c.id); if (!el) continue;
       el.style.left = this._tlX(c.tlStartUs) + 'px';
       el.style.width = Math.max(8, this._usToPx(textDurUs(c))) + 'px';
+      el.style.display = textDurUs(c) > 0 ? '' : 'none';   // a caption whose words were cut away hides until the cut brings them back
       el.classList.toggle('selected', c.id === this.selectedId);
-      el.querySelector('.tl-tclip-text').textContent = 'T ' + String(c.text || '').split('\n')[0];
+      el.classList.toggle('cap', !!c.cap);
+      el.querySelector('.tl-tclip-text').textContent = (c.cap ? 'CC ' : 'T ') + String(c.text || '').split('\n')[0];
     }
     this.trackEl.classList.toggle('has-text', tt.items.length > 0);
     this._layoutRuler(total);
@@ -563,6 +581,20 @@ export class TimelineView {
       tick.style.left = this._tlX(sToUs(s)) + 'px';
       if (major) tick.dataset.t = fmtTime(sToUs(s)).replace(/\.\d$/, '');
       frag.appendChild(tick);
+    }
+    // beat markers (v0.40): one mark per beat, brighter on the downbeat of each bar of 4
+    for (const t of this.project.tracks) for (const c of (t.clips || [])) {
+      if (!c.beats || !Array.isArray(c.beats.srcUs)) continue;
+      const spd = clipSpeed(c), end = c.tlStartUs + clipDurUs(c);
+      c.beats.srcUs.forEach((src, i) => {
+        if (src < c.inUs || src > c.outUs) return;
+        const tl = c.tlStartUs + Math.round((src - c.inUs) / spd);
+        if (tl > end || tl > total) return;
+        const b = document.createElement('span');
+        b.className = 'tl-beat' + (i % 4 === 0 ? ' bar' : '');
+        b.style.left = this._tlX(tl) + 'px';
+        frag.appendChild(b);
+      });
     }
     r.appendChild(frag);
   }
@@ -707,11 +739,22 @@ export class TimelineView {
           clip.tlStartUs = d.origStart + shift; clip.outUs = d.origOut - shift;
         } else clip.outUs = Math.max(d.origOut + dUs, TEXT_MIN_US);
       } else if (d.side === 'l') {
-        const dSrc = Math.round(dUs * clipSpeed(clip));   // finger moves in timeline time; in/out live in source time
+        let dSrc = Math.round(dUs * clipSpeed(clip));   // finger moves in timeline time; in/out live in source time
+        if (this.snapBeats) {                              // v0.40: the edge snaps onto a beat marker
+          const edgeTl = d.origStart + dUs, b = this._nearBeat(edgeTl, clip.id);
+          if (b != null) dSrc = Math.round((b - d.origStart) * clipSpeed(clip));
+        }
         const newIn = Math.max(0, Math.min(d.origIn + dSrc, clip.outUs - MIN_CLIP_US));
         if (d.lane === 'a') clip.tlStartUs = Math.max(0, d.origStart + Math.round((newIn - d.origIn) / clipSpeed(clip)));   // music keeps its place on the timeline
         clip.inUs = newIn;
-      } else { const dSrc = Math.round(dUs * clipSpeed(clip)); clip.outUs = Math.min(srcMax, Math.max(d.origOut + dSrc, clip.inUs + MIN_CLIP_US)); }
+      } else {
+        let dSrc = Math.round(dUs * clipSpeed(clip));
+        if (this.snapBeats) {
+          const edgeTl = d.origStart + Math.round((d.origOut - clip.inUs) / clipSpeed(clip)) + dUs, b = this._nearBeat(edgeTl, clip.id);
+          if (b != null) dSrc = Math.round((b - d.origStart) * clipSpeed(clip)) - (d.origOut - clip.inUs);
+        }
+        clip.outUs = Math.min(srcMax, Math.max(d.origOut + dSrc, clip.inUs + MIN_CLIP_US));
+      }
       this._layout();   // in place: no element churn under the finger
       return;
     }
