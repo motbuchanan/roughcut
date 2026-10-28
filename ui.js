@@ -537,6 +537,17 @@ function openAuto(show) {
   els.tlAuto.setAttribute('aria-pressed', String(on));
   if (on) { autoPlan = null; renderAuto(); }
 }
+// + Media button: close whatever sheet is open so the media tray comes back (v0.43)
+function showMedia() {
+  openAuto(false);
+  if (view && view.selectedId) { view.selectedId = null; view.render(); updateToolbar(); renderSheet(); }
+}
+// CC button: open the Auto sheet straight at the captions rows (v0.43)
+function openCaptions() {
+  if (view && view.selectedId) { view.selectedId = null; view.render(); updateToolbar(); renderSheet(); }
+  openAuto(true);
+  requestAnimationFrame(() => { const sh = els.autoSheet, row = els.autoCapRow; if (sh && row) sh.scrollTop = Math.max(0, row.offsetTop - sh.offsetTop - 6); });
+}
 function renderAuto() {
   if (!current) return;
   if (!els.autoPacing.childElementCount) {
@@ -1264,15 +1275,14 @@ async function onStripClick(e) {
   if (m.kind === 'audio') {
     if (!mainTrack(current).clips.length) { toast('Add a video clip first, then music goes under it'); return; }
     const newId = bus.do(addAudioCmd(current, m, view.playheadUs));
-    view.selectClip(newId, { moveHead: true });
     const c = findClip(current, newId);
     if (c.tlStartUs + clipDurUs(c) > totalUs(current)) toast('Music runs past the end of the cut; it stops where the video ends', 2600);
     else toast('Music added under the cut');
     return;
   }
   const newId = bus.do(addClipCmd(current, m));
-  view.selectClip(newId, { moveHead: true });
-  toast('Added to timeline');
+  { const c = findClip(current, newId); if (c) view.setPlayhead(c.tlStartUs); }   // v0.43: no auto-select, so the media tray stays up for the next tile
+  toast('Added to timeline · tap it to edit');
 }
 
 // ---- import --------------------------------------------------------------
@@ -1511,7 +1521,7 @@ export function initUI() {
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
     pullSave: $('#pull-save'), pullShare: $('#pull-share'), pullAdd: $('#pull-add'),
-    tlText: $('#tl-text'), tlTitle: $('#tl-title'), tlAuto: $('#tl-auto'),
+    tlText: $('#tl-text'), tlTitle: $('#tl-title'), tlAuto: $('#tl-auto'), tlCc: $('#tl-cc'), tlMedia: $('#tl-media'), autoCapRow: $('#auto-cap-row'),
     autoSheet: $('#auto-sheet'), autoClose: $('#auto-close'), autoPacing: $('#auto-pacing'), autoFind: $('#auto-find'), autoApply: $('#auto-apply'), autoReport: $('#auto-report'),
     autoBeats: $('#auto-beats'), autoSnap: $('#auto-snap'), autoPrevB: $('#auto-prevb'), autoNextB: $('#auto-nextb'), autoBeatsClear: $('#auto-beats-clear'), autoBeatsInfo: $('#auto-beats-info'),
     autoCaptions: $('#auto-captions'), autoCapModel: $('#auto-capmodel'), autoFix: $('#auto-fix'), autoCapClear: $('#auto-cap-clear'), autoCapProgress: $('#auto-cap-progress'), autoCapBar: $('#auto-cap-bar'), autoCapCancel: $('#auto-cap-cancel'),
@@ -1620,6 +1630,8 @@ export function initUI() {
   els.tlText.addEventListener('click', addTextAtPlayhead);
   els.tlTitle.addEventListener('click', addTitleCard);
   els.tlAuto.addEventListener('click', () => openAuto());
+  els.tlCc.addEventListener('click', openCaptions);
+  els.tlMedia.addEventListener('click', showMedia);
   els.autoClose.addEventListener('click', () => openAuto(false));
   els.autoPacing.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickPacing(b.dataset.k); });
   els.autoFind.addEventListener('click', findDeadAir);

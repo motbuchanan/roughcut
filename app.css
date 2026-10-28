@@ -444,3 +444,66 @@ main { flex: 1 1 auto; position: relative; overflow: hidden; }
 .tpbtn.small { min-width: 48px; font-size: 13px; font-weight: 700; letter-spacing: -.02em; }
 .trimgrid { flex: 1 1 auto; display: grid; grid-template-columns: auto 1fr auto; gap: 6px; }
 .trimgrid .tlbtn { min-height: 38px; }
+
+/* ---- v0.43 phone fit: the editor never scrolls as a page ----
+   Top to bottom: preview (takes whatever height is left, never under 150px),
+   play controls, toolbar, timeline strip, then ONE bottom panel: the media tray,
+   or the open sheet (clip / text / Auto) instead of it. Sheets scroll inside
+   themselves. Works inside the site's frame and with larger text settings. */
+#app { height: 100dvh; overflow: hidden; }
+html, body { overflow: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+#app:has(#screen-editor.active) header.topbar { padding: 5px 12px; }
+#app:has(#screen-editor.active) .wordmark { font-size: 16px; }
+#app:has(#screen-editor.active) .badge { padding: 4px 10px; font-size: 11px; }
+#screen-editor.active { overflow-x: hidden; overflow-y: auto; }
+#screen-editor .editbar { padding: 6px 10px; gap: 8px; }
+#screen-editor .editbar .title { min-width: 0; flex: 0 1 auto; }
+#screen-editor .editbar .cbadge { white-space: nowrap; }
+#screen-editor .editbar .settings-btn { margin-left: auto; }
+#screen-editor .editbar .cbadge + .settings-btn { margin-left: 6px; }
+.stage {
+  position: relative; top: auto; z-index: 1;
+  flex: 1 1 0; height: auto; min-height: 150px; padding: 8px;
+}
+.stage .tp-time {
+  position: absolute; left: 10px; bottom: 8px; z-index: 2; flex: none;
+  background: rgba(0,0,0,.62); color: #fff; border-radius: 999px; padding: 3px 9px;
+  font-size: 12px; pointer-events: none;
+}
+.transport {
+  position: relative; top: auto; z-index: 1;
+  justify-content: center; gap: 8px; padding: 6px 10px;
+}
+.transport .tpbtn { min-width: 44px; min-height: 44px; }
+.transport .tpbtn.play { min-width: 56px; }
+.timeline { flex: 0 0 auto; display: flex; flex-direction: column; }
+/* only an open sheet may shrink (it scrolls inside); otherwise a too-short screen scrolls the editor */
+#screen-editor:has(.timeline > :is(.text-sheet, .clip-sheet, .pull-sheet):not(.hidden)) .timeline { flex: 0 1 auto; min-height: 0; }
+.timeline > .tl-toolbar { order: 1; flex: 0 0 auto;
+  -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); padding-right: 28px; }
+.timeline > .tl-viewport { order: 2; flex: 0 0 auto; }
+.timeline > .text-sheet, .timeline > .clip-sheet, .timeline > .pull-sheet {
+  order: 3; flex: 0 1 auto; min-height: 0; max-height: 34dvh;
+  overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--line);
+}
+/* one bottom panel: the media tray steps aside while a sheet is open */
+#screen-editor:has(.timeline > :is(.text-sheet, .clip-sheet, .pull-sheet):not(.hidden)) .tray { display: none; }
+.tray { flex: 0 0 auto; }
+.tray-head { padding: 6px 12px; }
+.tray .media-strip { padding-bottom: 10px; }
+.tray .media-tile { width: 64px; height: 64px; }
+/* narrow phones and big text: everything still fits across */
+@media (max-width: 380px) {
+  .transport { gap: 6px; padding: 6px 8px; }
+  .transport .tpbtn { min-width: 40px; }
+  #screen-editor .editbar .cbadge { display: none; }
+  .tlbtn.wide { padding-left: 10px; padding-right: 10px; }
+  .auto-sheet .cs-label { min-width: 0; }
+  .auto-sheet .cs-row { flex-wrap: wrap; }
+  .auto-sheet .cs-row .seg { min-width: 0; }
+}
+/* short screens (inside the site frame, small phones): drop the app bar in the editor, smaller preview floor */
+@media (max-height: 700px) {
+  #app:has(#screen-editor.active) header.topbar { display: none; }
+  .stage { min-height: 120px; }
+}

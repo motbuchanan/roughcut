@@ -6,14 +6,25 @@
 import { checkCapability } from './media.js';
 import { initUI, showCapabilityFail, toast } from './ui.js';
 
-const VERSION = 'v0.42 \u00b7 Oct 27';
+const VERSION = 'v0.43 \u00b7 Oct 28';
 
 async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
   // Service worker + OPFS + ES modules only work over the Pages URL, not file://
   if (location.protocol === 'file:') return;
   try {
-    await navigator.serviceWorker.register('sw.js');
+    const hadController = !!navigator.serviceWorker.controller;
+    const reg = await navigator.serviceWorker.register('sw.js');
+    try { reg.update(); } catch (_) {}
+    // v0.43: when a new version takes over, load it. On the Projects screen it reloads
+    // straight away; mid-edit it waits and says so, so nothing in progress is lost.
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || window.__rcReloading) return;
+      const editing = document.querySelector('#screen-editor.active');
+      if (!editing) { window.__rcReloading = true; location.reload(); return; }
+      const b = document.getElementById('badge');
+      if (b) { b.textContent = 'Update ready \u00b7 tap'; b.onclick = () => { window.__rcReloading = true; location.reload(); }; }
+    });
   } catch (e) {
     console.warn('SW registration failed', e);
   }
