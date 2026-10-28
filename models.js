@@ -120,7 +120,9 @@ export async function downloadModel(id, onProgress, signal) {
       }
       await w.close();
     } catch (e) { try { await w.abort(); } catch (_) {} throw e; }
-    if (len && got !== len) throw new Error(`${f.path}: download cut short (${got} of ${len} bytes)`);
+    // v0.44: a CDN may send the file compressed, so content-length is the SMALLER compressed size and the
+    // unpacked body is bigger. Only fewer bytes than promised means the download really was cut short.
+    if (len && got < len) throw new Error(`${f.path}: download cut short (${got} of ${len} bytes)`);
     done += got;
     files.push({ path: f.path, bytes: got });
     if (onProgress) onProgress({ id, done, total, file: f.path });
