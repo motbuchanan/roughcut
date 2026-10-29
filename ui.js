@@ -30,7 +30,13 @@ import { PACING, PACING_ORDER, planTighten, tightenCmd, fmtSec } from './tighten
 import { analyzeBeats, beatsToUs, allBeatTlUs, nearestBeat } from './beats.js';
 import { MODELS, modelById, allStatus, closure, bytesToGet, downloadModel, deleteModel, installedBytes, fmtMB, captionModels, modelStatus as modelStatusOf } from './models.js';
 import { buildCaptionItems, setCaptionsCmd, retimeCaptions, captionCount, captionItems, parseFixes, fixesToText, fmtClock } from './captions.js';
-import { readTranscript, writeTranscript } from './state.js';
+import { readTranscript, writeTranscript, readMedia } from './state.js';
+import { addOverlayCmd, ovOf, ovSrcUs, ovStateAt } from './overlay.js';
+import { keyOf, KEY_DEFAULT, guessKeyColor, sampleColor } from './chroma.js';
+import { analyseClip, stabCovers, STRENGTH_LABELS, corrections } from './stabilize.js';
+import { analyseReframe, reframeUseful } from './reframe.js';
+import { cutOf, CUT_MODEL_ID } from './cutout.js';
+import { hasKeys, valuesAt, upsertKey, keyIndexNear, nextKeyT, keyTlUs, setLive, clearLive, clipAt, getLive as getLiveVals, MAIN_KEYS, OV_KEYS } from './keyframes.js';
 import { extractAudio, probeAudioCodec, copyPlanFor, canMakeM4a, baseName, fmtBytes } from './extract.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -296,9 +302,12 @@ function renderSheet() {
   // While a text is selected and we are not playing, render it at rest so it is
   // stable to place/style; playback and export animate it.
   if (previewer) previewer.staticTextId = (isText && !playTimer) ? c.id : null;
+  const isOv = !!(c && laneOf(current, c.id) === 'o');
   els.textSheet.classList.toggle('hidden', !isText);
-  els.sheet.classList.toggle('hidden', !c || isText);
+  els.ovSheet.classList.toggle('hidden', !isOv);
+  els.sheet.classList.toggle('hidden', !c || isText || isOv);
   if (isText) { renderTextSheet(c); return; }
+  if (isOv) { renderOvSheet(c); return; }
   if (!c) return;
   const m = current.media.find((x) => x.id === c.mediaId);
   const lane = laneOf(current, c.id);
@@ -321,9 +330,359 @@ function renderSheet() {
   renderTrimRow(c, lane);
   renderSpeedRow(c, m, lane);
   renderFrameRows(c, m, lane);
+  renderKeyRow('cs', c, lane === 'v' && !!(m && (m.kind === 'video' || m.kind === 'image')));
+  renderStabRow(c, m, lane);
+  renderRfRow(c, m, lane);
   renderLookRows(c, m, lane);
   renderTransSheet(c);
 }
+
+// ---- PiP overlays + keyframes (v0.45) ----
+// Source time of the playhead inside clip c, or null when the playhead is off the clip.
+function keySrcAt(c) {
+  if (!c || !view) return null;
+  const lane = laneOf(current, c.id), t = view.playheadUs;
+  if (t < c.tlStartUs || t >= c.tlStartUs + clipDurUs(c)) return null;
+  return lane === 'o' ? ovSrcUs(c, t) : tlToSrcUs(c, t - c.tlStartUs);
+}
+const keyProps = (c) => (laneOf(current, c.id) === 'o' ? OV_KEYS : MAIN_KEYS);
+function keyBase(c) {
+  if (laneOf(current, c.id) === 'o') { const o = ovOf(c); return { x: o.x, y: o.y, s: o.s, o: o.o }; }
+  const f = frameOf(c); return { x: f.x, y: f.y, scale: f.scale };
+}
+// Current values at the playhead (keys interpolated), for capturing a new key.
+function valuesHere(c, src) { return valuesAt(c.kf, src, keyBase(c), keyProps(c)); }
+function renderKeyRow(pre, c, show) {
+  const row = els[pre + 'KfRow']; if (!row) return;
+  row.classList.toggle('hidden', !show);
+  if (!show) return;
+  const src = keySrcAt(c), n = hasKeys(c) ? c.kf.length : 0;
+  const here = src != null && keyIndexNear(c.kf, src) >= 0;
+  const b = els[pre + 'Key'];
+  b.disabled = src == null;
+  b.classList.toggle('on', here);
+  b.setAttribute('aria-pressed', String(here));
+  b.innerHTML = here ? '&#9670; Keyed' : '&#9670; Key';
+  els[pre + 'KPrev'].disabled = src == null || nextKeyT(c.kf, src, -1) == null;
+  els[pre + 'KNext'].disabled = src == null || nextKeyT(c.kf, src, 1) == null;
+  els[pre + 'KCount'].textContent = src == null ? 'playhead off clip' : (n ? `${n} key${n === 1 ? '' : 's'}` : 'no keys');
+  els[pre + 'KClear'].classList.toggle('hidden', !n);
+}
+function refreshKeyRows() {
+  const c = selectedClip(); if (!c) return;
+  const lane = laneOf(current, c.id);
+  if (lane === 'o' && !els.ovSheet.classList.contains('hidden')) { renderKeyRow('ov', c, true); renderOvValues(c); }
+  else if (lane === 'v' && !els.sheet.classList.contains('hidden')) { const m = current.media.find((x) => x.id === c.mediaId); renderKeyRow('cs', c, !!(m && (m.kind === 'video' || m.kind === 'image'))); }
+}
+function toggleKey(pre) {
+  const c = selectedClip(); if (!c) return;
+  const src = keySrcAt(c); if (src == null) { toast('Move the playhead onto the clip', 1600); return; }
+  if (hasKeys(c) && keyIndexNear(c.kf, src) >= 0) {
+    const arr = c.kf.slice(); arr.splice(keyIndexNear(c.kf, src), 1);
+    bus.do(setClipAudioCmd(current, c.id, { kf: arr.length ? arr : undefined }, 'Remove keyframe'));
+    return;
+  }
+  const first = !hasKeys(c);
+  bus.do(setClipAudioCmd(current, c.id, { kf: upsertKey(c.kf, src, valuesHere(c, src)) }, 'Add keyframe'));
+  if (first) toast('Key set. Move the playhead, change the picture, and a second key is made for you.', 3200);
+}
+function stepKey(dir) {
+  const c = selectedClip(); if (!c || !hasKeys(c)) return;
+  const src = keySrcAt(c); if (src == null) return;
+  const t = nextKeyT(c.kf, src, dir); if (t == null) return;
+  pausePlay();
+  view.setPlayhead(keyTlUs(c, { t }), true);
+}
+function clearKeys() {
+  const c = selectedClip(); if (!c || !hasKeys(c)) return;
+  bus.do(setClipAudioCmd(current, c.id, { kf: undefined }, 'Clear keyframes'));
+}
+// Commit a change to keyed props: onto the key at the playhead when the clip has keys
+// (making one there if needed), else onto the base look. One undo step.
+function commitKeyed(c, vals, label) {
+  clearLive(c.id);
+  const lane = laneOf(current, c.id);
+  const src = keySrcAt(c);
+  if (hasKeys(c) && src != null) { bus.do(setClipAudioCmd(current, c.id, { kf: upsertKey(c.kf, src, { ...valuesHere(c, src), ...vals }) }, label)); return; }
+  if (lane === 'o') bus.do(setClipAudioCmd(current, c.id, { ov: { ...ovOf(c), ...vals } }, label));
+  else bus.do(setClipFrameCmd(current, c.id, vals, label));
+}
+// overlay sheet
+function renderOvValues(c) {
+  const v = valuesHere(c, keySrcAt(c) ?? c.inUs);   // keyed values at the playhead (fades not included)
+  if (!ovSlide) { els.ovSize.value = Math.round(v.s * 100); els.ovOp.value = Math.round(v.o * 100); }
+  els.ovSizeVal.textContent = els.ovSize.value + '%';
+  els.ovOpVal.textContent = els.ovOp.value + '%';
+}
+function renderOvSheet(c) {
+  const m = current.media.find((x) => x.id === c.mediaId);
+  const o = ovOf(c);
+  els.ovName.textContent = '▣ ' + (m ? m.name.replace(/\.[^.]+$/, '') : 'overlay') + ' · ' + fmtTime(clipDurUs(c)) + (m && m.kind === 'video' ? ' · silent' : '');
+  els.ovRound.setAttribute('aria-pressed', String(!!o.round)); els.ovRound.classList.toggle('on', !!o.round);
+  els.ovFade.setAttribute('aria-pressed', String(!!o.fade)); els.ovFade.classList.toggle('on', !!o.fade);
+  renderOvValues(c);
+  renderKeyRow('ov', c, true);
+  renderGs(c);
+  renderCut(c);
+}
+// ---- cut out person (v0.48) ----
+function renderCut(c) {
+  const on = !!(c.cut && c.cut.on);
+  els.ovCut.classList.toggle('on', on); els.ovCut.setAttribute('aria-pressed', String(on));
+  els.ovCut.textContent = on ? 'Person cut out' : 'Cut out person';
+  els.ovCutAdj.classList.toggle('hidden', !on);
+  if (!cutSlide) { els.ovCutEdge.value = Math.round(cutOf(c).edge * 100); els.ovCutEdgeVal.textContent = els.ovCutEdge.value; }
+}
+async function toggleCut() {
+  const c = selectedClip(); if (!c || laneOf(current, c.id) !== 'o') return;
+  const on = !(c.cut && c.cut.on);
+  if (on) {
+    const need = closure(CUT_MODEL_ID).filter((m) => true);
+    const st = await allStatus();
+    if (need.some((m) => !(st[m.id] && st[m.id].installed))) {
+      toast('Cut out person needs a one-time download (' + fmtMB(bytesToGet(CUT_MODEL_ID, st)) + ')', 2800);
+      openModels();
+      return;
+    }
+  }
+  const props = { cut: { ...cutOf(c), on } };
+  if (on && c.key && c.key.on) props.key = { ...c.key, on: false };   // one background remover at a time
+  bus.do(setClipAudioCmd(current, c.id, props, on ? 'Cut out person' : 'Keep background'));
+  if (on) toast('Background removed around people. Works best on one person facing the camera.', 3000);
+}
+let cutSlide = null;
+function onCutSlide() {
+  const c = selectedClip(); if (!c) return;
+  if (!cutSlide) cutSlide = { before: c.cut ? { ...c.cut } : undefined };
+  c.cut = { ...cutOf(c), edge: Number(els.ovCutEdge.value) / 100 };
+  els.ovCutEdgeVal.textContent = els.ovCutEdge.value;
+  refreshPreview();
+}
+function onCutSlideEnd() {
+  const c = selectedClip(); if (!c || !cutSlide) { cutSlide = null; return; }
+  const next = { ...cutOf(c) };
+  if (cutSlide.before === undefined) delete c.cut; else c.cut = cutSlide.before;
+  cutSlide = null;
+  bus.do(setClipAudioCmd(current, c.id, { cut: next }, 'Cut-out edge'));
+}
+// ---- green screen (v0.46) ----
+const GS_SLIDERS = { tol: [100, 'ovGsTol'], soft: [100, 'ovGsSoft'], spill: [100, 'ovGsSpill'] };
+function renderGs(c) {
+  const k = keyOf(c), on = !!(c.key && c.key.on);
+  els.ovGs.classList.toggle('on', on); els.ovGs.setAttribute('aria-pressed', String(on));
+  els.ovGs.textContent = on ? 'Green screen on' : 'Green screen';
+  els.ovGsPick.classList.toggle('hidden', !on); els.ovGsSwatch.classList.toggle('hidden', !on); els.ovGsAdj.classList.toggle('hidden', !on);
+  els.ovGsPick.classList.toggle('on', gsPicking === c.id);
+  els.ovGsSwatch.style.background = k.color;
+  if (!gsBefore) for (const [prop, [mul, id]] of Object.entries(GS_SLIDERS)) { els[id].value = Math.round(k[prop] * mul); els[id + 'Val'].textContent = els[id].value; }
+}
+let gsPicking = null, gsBefore = null;
+function toggleGs() {
+  const c = selectedClip(); if (!c || laneOf(current, c.id) !== 'o') return;
+  const on = !(c.key && c.key.on);
+  let color = keyOf(c).color;
+  if (on && !(c.key && c.key.color)) {   // first time: guess the screen colour from the picture's edges
+    const raw = previewer.overlayRaw(c.id);
+    if (raw) { try { color = guessKeyColor(raw.img, raw.w, raw.h); } catch (_) {} }
+  }
+  const gprops = { key: { ...keyOf(c), color, on } };
+  if (on && c.cut && c.cut.on) gprops.cut = { ...c.cut, on: false };   // one background remover at a time
+  bus.do(setClipAudioCmd(current, c.id, gprops, on ? 'Green screen on' : 'Green screen off'));
+  if (on) toast('Background removed. If some stays, tap Pick colour and tap it on the preview.', 3200);
+}
+function startGsPick() {
+  const c = selectedClip(); if (!c) return;
+  gsPicking = gsPicking === c.id ? null : c.id;
+  els.preview.classList.toggle('picking', !!gsPicking);
+  if (gsPicking) { pausePlay(); toast('Tap the screen colour on the overlay in the preview', 2200); }
+  renderGs(c);
+}
+// Called from the preview tap handler while picking. Returns true when it used the tap.
+function pickGsAt(pt) {
+  if (!gsPicking) return false;
+  const c = findClip(current, gsPicking);
+  const box = (previewer.ovBoxes || []).find((b) => b.id === gsPicking);
+  gsPicking = null; els.preview.classList.remove('picking');
+  if (!c || !box || pt.x < box.x0 || pt.x > box.x1 || pt.y < box.y0 || pt.y > box.y1) { toast('Tap inside the overlay', 1600); if (c) renderGs(c); return true; }
+  const raw = previewer.overlayRaw(c.id); if (!raw) return true;
+  const color = sampleColor(raw.img, raw.w, raw.h, (pt.x - box.x0) / (box.x1 - box.x0), (pt.y - box.y0) / (box.y1 - box.y0));
+  bus.do(setClipAudioCmd(current, c.id, { key: { ...keyOf(c), on: true, color } }, 'Pick key colour'));
+  return true;
+}
+function onGsSlide(prop) {
+  const c = selectedClip(); if (!c) return;
+  const [mul, id] = GS_SLIDERS[prop];
+  if (!gsBefore) gsBefore = { id: c.id, key: c.key ? { ...c.key } : undefined };
+  c.key = { ...keyOf(c), [prop]: Number(els[id].value) / mul };   // live, uncommitted
+  els[id + 'Val'].textContent = els[id].value;
+  refreshPreview();
+}
+function onGsSlideEnd(prop) {
+  const c = selectedClip(); if (!c || !gsBefore) { gsBefore = null; return; }
+  const next = { ...keyOf(c) };
+  if (gsBefore.key === undefined) delete c.key; else c.key = gsBefore.key;   // revert, then commit as one undo step
+  gsBefore = null;
+  bus.do(setClipAudioCmd(current, c.id, { key: next }, 'Green screen ' + (prop === 'tol' ? 'strength' : prop === 'soft' ? 'edge' : 'spill')));
+}
+let ovSlide = null;   // { id, key, before }
+function onOvSlide(key) {
+  const c = selectedClip(); if (!c || laneOf(current, c.id) !== 'o') return;
+  const v = key === 's' ? Math.max(0.1, Number(els.ovSize.value) / 100) : Number(els.ovOp.value) / 100;
+  ovSlide = ovSlide || { id: c.id, key };
+  setLive(c.id, { [key]: v });
+  els.ovSizeVal.textContent = els.ovSize.value + '%'; els.ovOpVal.textContent = els.ovOp.value + '%';
+  refreshPreview();
+}
+function onOvSlideEnd(key) {
+  const c = selectedClip(); if (!c || !ovSlide) { ovSlide = null; return; }
+  const v = key === 's' ? Math.max(0.1, Number(els.ovSize.value) / 100) : Number(els.ovOp.value) / 100;
+  ovSlide = null;
+  commitKeyed(c, { [key]: v }, key === 's' ? 'Overlay size' : 'Overlay opacity');
+}
+const OV_SPOTS = { tl: [0.27, 0.2], tr: [0.73, 0.2], c: [0.5, 0.5], bl: [0.27, 0.62], br: [0.73, 0.62] };
+function placeOv(k) {
+  const c = selectedClip(); if (!c || !OV_SPOTS[k]) return;
+  const [x, y] = OV_SPOTS[k];
+  commitKeyed(c, { x, y }, 'Place overlay');
+}
+function toggleOvFlag(flag) {
+  const c = selectedClip(); if (!c) return;
+  const o = ovOf(c);
+  bus.do(setClipAudioCmd(current, c.id, { ov: { ...o, [flag]: !o[flag] } }, flag === 'fade' ? 'Overlay fade' : 'Overlay corners'));
+}
+
+// ---- follow person (v0.49): keep the person in a narrower frame (16:9 footage in a 9:16 project) ----
+let rfJob = null;   // { clipId | 'all', cancelled }
+async function needCutModel(what) {
+  const st = await allStatus();
+  if (closure(CUT_MODEL_ID).some((m) => !(st[m.id] && st[m.id].installed))) {
+    toast(what + ' needs the Cut out person download (' + fmtMB(bytesToGet(CUT_MODEL_ID, st)) + ', once)', 3000);
+    openModels();
+    return true;
+  }
+  return false;
+}
+function renderRfRow(c, m, lane) {
+  const show = lane === 'v' && !!(m && m.kind === 'video');
+  els.csRfRow.classList.toggle('hidden', !show);
+  els.csRfProg.classList.toggle('hidden', !(show && rfJob && rfJob.clipId === c.id));
+  if (!show) return;
+  els.csRf.disabled = !!rfJob;
+  const on = !!(c.rf && Array.isArray(c.kf) && c.kf.length);
+  els.csRf.textContent = on ? 'Follow again' : 'Follow person';
+  els.csRfClear.classList.toggle('hidden', !on);
+}
+// Measure one clip and return the undoable command (or null when nothing to do).
+async function rfCommandFor(c, onProgress) {
+  const m = current.media.find((x) => x.id === c.mediaId);
+  if (!m || m.kind !== 'video') return null;
+  const file = await readMedia(current.id, m.opfs);
+  const rec = await analyseReframe(file, m, c, current.canvas.w, current.canvas.h, onProgress, () => rfJob && rfJob.cancelled);
+  return { cmd: setClipAudioCmd(current, c.id, { fit: 'fill', kf: rec.kf, rf: { found: +rec.found.toFixed(2) } }, 'Follow person'), rec };
+}
+function rfReport(found, kf) {
+  if (found < 0.2) return 'No one found to follow. The frame stays centred; drag the picture to place it.';
+  let n = 0; for (let i = 1; i < kf.length; i++) if (kf[i].x !== kf[i - 1].x || kf[i].y !== kf[i - 1].y) n++;
+  return n ? `Following the person. The frame moves ${n === 1 ? 'once' : n + ' times'}; drag at any moment to adjust.` : 'Following the person. They stay put, so the frame holds still.';
+}
+async function pickRf() {
+  const c = selectedClip(); if (!c || rfJob) return;
+  const m = current.media.find((x) => x.id === c.mediaId); if (!m || m.kind !== 'video') return;
+  pausePlay();
+  if (await needCutModel('Follow person')) return;
+  if (!reframeUseful(m.w || 16, m.h || 9, current.canvas.w, current.canvas.h)) toast('This clip already matches the frame shape, so there is little room to move. Set the project to 9:16 in Settings for vertical.', 3600);
+  rfJob = { clipId: c.id, cancelled: false };
+  els.csRfBar.style.width = '0%'; els.csRfPct.textContent = 'Finding the person…';
+  renderSheet();
+  try {
+    const r = await rfCommandFor(c, (p) => { els.csRfBar.style.width = Math.round(p * 100) + '%'; els.csRfPct.textContent = Math.round(p * 100) + '%'; });
+    rfJob = null;
+    if (r) { bus.do(r.cmd); toast(rfReport(r.rec.found, r.rec.kf), 3200); }
+    renderSheet();
+  } catch (e) {
+    const cancelled = e && e.name === 'AbortError';
+    rfJob = null; renderSheet();
+    toast(cancelled ? 'Follow cancelled' : 'Could not follow in this clip: ' + (e && e.message ? e.message : e), cancelled ? 1400 : 3200);
+  }
+}
+function clearRf() {
+  const c = selectedClip(); if (!c || !c.rf) return;
+  bus.do(setClipAudioCmd(current, c.id, { kf: undefined, rf: undefined }, 'Stop following'));
+}
+function cancelRf() { if (rfJob) rfJob.cancelled = true; }
+// Auto sheet: 9:16 and follow on every main-track video, one undo for the framing.
+async function makeVertical() {
+  if (!current || rfJob || autoBusy) return;
+  pausePlay();
+  const vids = mainTrack(current).clips.filter((c) => { const m = current.media.find((x) => x.id === c.mediaId); return m && m.kind === 'video'; });
+  if (!vids.length) { toast('No videos on the main track to frame', 2000); return; }
+  if (await needCutModel('Make it vertical')) return;
+  const p = CANVAS_PRESETS.p916;
+  if (current.canvas.w !== p.w || current.canvas.h !== p.h) setAspect('p916');
+  rfJob = { clipId: 'all', cancelled: false };
+  els.autoVertProg.classList.remove('hidden'); els.autoVert.disabled = true; els.autoVertBar.style.width = '0%';
+  const cmds = []; let found = 0;
+  try {
+    for (let i = 0; i < vids.length; i++) {
+      els.autoVertInfo.textContent = `Finding the person in clip ${i + 1} of ${vids.length}…`;
+      const r = await rfCommandFor(vids[i], (q) => { els.autoVertBar.style.width = Math.round((i + q) / vids.length * 100) + '%'; });
+      if (r) { cmds.push(r.cmd); found += r.rec.found; }
+    }
+    if (cmds.length) bus.do({ label: 'Make it vertical', do() { cmds.forEach((x) => x.do()); }, undo() { cmds.slice().reverse().forEach((x) => x.undo()); } });
+    els.autoVertInfo.textContent = found / Math.max(1, cmds.length) < 0.2
+      ? 'Now 9:16. No one was found to follow, so clips are centred; drag the picture on any clip to place it.'
+      : `Now 9:16. ${cmds.length === 1 ? '1 clip follows' : cmds.length + ' clips follow'} the person. Undo puts the framing back; the 9:16 shape stays (change it in Settings).`;
+  } catch (e) {
+    const cancelled = e && e.name === 'AbortError';
+    els.autoVertInfo.textContent = cancelled ? 'Cancelled. Nothing was changed except the 9:16 shape.' : 'Could not finish: ' + (e && e.message ? e.message : e);
+  } finally {
+    rfJob = null;
+    els.autoVertProg.classList.add('hidden'); els.autoVert.disabled = false;
+  }
+}
+
+// ---- stabilise (v0.47): measure the shake once, then smooth it at any strength ----
+let stabJob = null;   // { clipId, cancelled }
+function renderStabRow(c, m, lane) {
+  const show = lane === 'v' && !!(m && m.kind === 'video');
+  els.csStabRow.classList.toggle('hidden', !show);
+  els.csStabProg.classList.toggle('hidden', !(show && stabJob && stabJob.clipId === c.id));
+  if (!show) return;
+  const on = !!(c.stab && c.stab.on), k = on ? (c.stab.strength || 'medium') : 'off';
+  [...els.csStab.children].forEach((b) => { b.setAttribute('aria-pressed', String(b.dataset.k === k)); b.disabled = !!stabJob; });
+}
+async function pickStab(k) {
+  const c = selectedClip(); if (!c || stabJob) return;
+  const m = current.media.find((x) => x.id === c.mediaId); if (!m || m.kind !== 'video') return;
+  pausePlay();
+  if (k === 'off') { if (c.stab && c.stab.on) bus.do(setClipAudioCmd(current, c.id, { stab: { ...c.stab, on: false } }, 'Steady off')); return; }
+  if (c.stab && stabCovers(c.stab, c)) {
+    bus.do(setClipAudioCmd(current, c.id, { stab: { ...c.stab, on: true, strength: k } }, 'Steady: ' + STRENGTH_LABELS[k]));
+    reportStab(findClip(current, c.id));
+    return;
+  }
+  stabJob = { clipId: c.id, cancelled: false };
+  els.csStabBar.style.width = '0%'; els.csStabPct.textContent = 'Measuring shake…';
+  renderSheet();
+  const id = c.id;
+  try {
+    const file = await readMedia(current.id, m.opfs);
+    const rec = await analyseClip(file, m, c.inUs, c.outUs, (p) => { els.csStabBar.style.width = Math.round(p * 100) + '%'; els.csStabPct.textContent = Math.round(p * 100) + '%'; }, () => stabJob && stabJob.cancelled);
+    stabJob = null;
+    bus.do(setClipAudioCmd(current, id, { stab: { ...rec, on: true, strength: k } }, 'Steady: ' + STRENGTH_LABELS[k]));
+    reportStab(findClip(current, id));
+  } catch (e) {
+    const cancelled = e && e.name === 'AbortError';
+    stabJob = null; renderSheet();
+    toast(cancelled ? 'Steady cancelled' : 'Could not steady this clip: ' + (e && e.message ? e.message : e), cancelled ? 1400 : 3200);
+  }
+}
+function reportStab(c) {
+  if (!c || !c.stab || !c.stab.on) return;
+  const z = corrections(c.stab).zoom;
+  toast(z > 1.005 ? `Steadied. Zoomed in ${Math.round((z - 1) * 100)}% so the edges stay hidden.` : 'Steadied. Very little shake found.', 2600);
+}
+function cancelStab() { if (stabJob) stabJob.cancelled = true; }
 
 // ---- colour: look presets, four sliders, .cube LUT (main-track picture clips) ----
 const ADJ = ['bright', 'contrast', 'sat', 'warm'];
@@ -391,7 +750,8 @@ function renderFrameRows(c, m, lane) {
   els.csFrameRow.classList.toggle('hidden', !show);
   els.csZoomRow.classList.toggle('hidden', !show);
   if (!show) return;
-  const f = frameOf(c);
+  const ks = keySrcAt(c);
+  const f = frameOf(hasKeys(c) && ks != null ? clipAt(c, ks) : c);
   [...els.csFit.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.f === f.fit)));
   els.csRot.innerHTML = '&#8635; ' + f.rot + '&deg;';
   els.csZoom.value = Math.round(f.scale * 100);
@@ -416,6 +776,7 @@ function onZoomStart() { const c = selectedClip(); zoomBefore = c ? frameOf(c).s
 function onZoomInput() {
   const c = selectedClip(); if (!c) return;
   const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(els.csZoom.value) / 100));
+  if (hasKeys(c)) { setLive(c.id, { scale: s }); els.csZoomVal.textContent = fmtZoom(s); refreshPreview(); return; }   // keyed (v0.45)
   c.xf = { x: 0, y: 0, scale: 1, rot: 0, opacity: 1, ...(c.xf || {}), scale: s };   // live, uncommitted
   const d = previewer.currentFrameDims();
   if (d) { const p = clampPan(els.preview.width, els.preview.height, d.fw, d.fh, c, c.xf.x, c.xf.y); c.xf.x = p.x; c.xf.y = p.y; }
@@ -425,6 +786,7 @@ function onZoomInput() {
 function onZoomChange() {
   const c = selectedClip(); if (!c) return;
   const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(els.csZoom.value) / 100));
+  if (hasKeys(c)) { zoomBefore = null; commitKeyed(c, { scale: s }, 'Zoom'); return; }
   const nx = c.xf ? c.xf.x : 0, ny = c.xf ? c.xf.y : 0;
   if (zoomBefore != null) c.xf = { ...(c.xf || {}), scale: zoomBefore };   // revert, then commit as one undo step
   if (s !== zoomBefore) bus.do(setClipFrameCmd(current, c.id, { scale: s, x: nx, y: ny }, 'Zoom'));
@@ -961,6 +1323,7 @@ function canvasPoint(e) {
 }
 function onPreviewDown(e) {
   const pt = canvasPoint(e);
+  if (pickGsAt(pt)) { e.preventDefault(); return; }   // green-screen colour picker (v0.46)
   const boxes = previewer.hitBoxes || [];
   for (let i = boxes.length - 1; i >= 0; i--) {
     const b = boxes[i];
@@ -970,6 +1333,22 @@ function onPreviewDown(e) {
       els.preview.setPointerCapture(e.pointerId);
       pdrag = { id: it.id, x0: it.x, y0: it.y, sx: pt.x, sy: pt.y, moved: false };
       if (view.selectedId !== it.id) view.selectClip(it.id);
+      els.preview.classList.add('dragging');
+      e.preventDefault();
+      return;
+    }
+  }
+  // PiP overlays (v0.45): drag one to move it; topmost wins.
+  const oboxes = previewer.ovBoxes || [];
+  for (let i = oboxes.length - 1; i >= 0; i--) {
+    const b = oboxes[i];
+    if (pt.x >= b.x0 && pt.x <= b.x1 && pt.y >= b.y0 && pt.y <= b.y1) {
+      const oc = findClip(current, b.id); if (!oc) return;
+      pausePlay();
+      els.preview.setPointerCapture(e.pointerId);
+      const st = ovStateAt(oc, view.playheadUs);
+      pdrag = { kind: 'ov', id: oc.id, x0: st.x, y0: st.y, sx: pt.x, sy: pt.y, moved: false };
+      if (view.selectedId !== oc.id) view.selectClip(oc.id);
       els.preview.classList.add('dragging');
       e.preventDefault();
       return;
@@ -985,8 +1364,9 @@ function onPreviewDown(e) {
   if (!m || (m.kind !== 'video' && m.kind !== 'image')) return;
   pausePlay();
   els.preview.setPointerCapture(e.pointerId);
-  const f = frameOf(sel);
-  pdrag = { kind: 'frame', id: sel.id, x0: f.x, y0: f.y, sx: pt.x, sy: pt.y, moved: false };
+  const src0 = keySrcAt(sel);
+  const f = frameOf(src0 != null ? clipAt(sel, src0) : sel);
+  pdrag = { kind: 'frame', id: sel.id, x0: f.x, y0: f.y, sx: pt.x, sy: pt.y, moved: false, keyed: hasKeys(sel) };
   els.preview.classList.add('panning');
   e.preventDefault();
 }
@@ -996,11 +1376,20 @@ function onPreviewMove(e) {
   const it = findClip(current, pdrag.id); if (!it) return;
   const dx = (pt.x - pdrag.sx) / els.preview.width, dy = (pt.y - pdrag.sy) / els.preview.height;
   if (Math.abs(dx) > 0.005 || Math.abs(dy) > 0.005) pdrag.moved = true;
+  if (pdrag.kind === 'ov') {
+    setLive(it.id, { x: Math.max(0, Math.min(1, pdrag.x0 + dx)), y: Math.max(0, Math.min(1, pdrag.y0 + dy)) });
+    refreshPreview();
+    return;
+  }
   if (pdrag.kind === 'frame') {
     const d = previewer.currentFrameDims();
     let nx = pdrag.x0 + dx, ny = pdrag.y0 + dy;
-    if (d) ({ x: nx, y: ny } = clampPan(els.preview.width, els.preview.height, d.fw, d.fh, it, nx, ny));
-    it.xf = { x: 0, y: 0, scale: 1, rot: 0, opacity: 1, ...(it.xf || {}), x: nx, y: ny };   // live, uncommitted
+    const src = keySrcAt(it);
+    const kc = src != null ? clipAt(it, src) : it;
+    if (d) ({ x: nx, y: ny } = clampPan(els.preview.width, els.preview.height, d.fw, d.fh, kc, nx, ny));
+    if (pdrag.keyed) setLive(it.id, { x: nx, y: ny });   // keyed: live override, committed onto the key here
+    else it.xf = { x: 0, y: 0, scale: 1, rot: 0, opacity: 1, ...(it.xf || {}), x: nx, y: ny };   // live, uncommitted
+    pdrag.nx = nx; pdrag.ny = ny;
     refreshPreview();
     return;
   }
@@ -1013,6 +1402,17 @@ function onPreviewUp() {
   const d = pdrag; pdrag = null;
   els.preview.classList.remove('dragging'); els.preview.classList.remove('panning');
   const it = findClip(current, d.id); if (!it) return;
+  if (d.kind === 'ov') {
+    const lv = getLiveVals(it.id);
+    if (d.moved && lv) commitKeyed(it, { x: lv.x, y: lv.y }, 'Move overlay');
+    else { clearLive(it.id); refreshPreview(); }
+    return;
+  }
+  if (d.kind === 'frame' && d.keyed) {
+    if (d.moved && d.nx != null) commitKeyed(it, { x: d.nx, y: d.ny }, 'Reposition');
+    else { clearLive(it.id); refreshPreview(); }
+    return;
+  }
   if (d.kind === 'frame') {
     const nx = it.xf ? it.xf.x : 0, ny = it.xf ? it.xf.y : 0;
     it.xf = { ...(it.xf || {}), x: d.x0, y: d.y0 };   // revert, then commit as one undo step
@@ -1195,7 +1595,7 @@ function refreshPreview() {
 }
 
 // single funnel for every playhead move (strip scroll, play loop, select, edit)
-function onPlayheadMoved(us) { refreshPreview(); }
+function onPlayheadMoved(us) { refreshPreview(); refreshKeyRows(); }
 
 // Playback clock is the AudioContext clock (M3): the playhead reads engine.nowUs()
 // every tick, so picture follows sound and battery-saver rAF throttling is irrelevant.
@@ -1269,6 +1669,13 @@ function renderMediaStrip() {
     strip.appendChild(tile);
   }
 }
+let addTo = 'main';   // media tray: tap a tile to add to the main track or as a PiP overlay
+function pickAddTo(k) {
+  addTo = k === 'pip' ? 'pip' : 'main';
+  [...els.addTo.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === addTo)));
+  els.tray.classList.toggle('pip-mode', addTo === 'pip');
+  if (addTo === 'pip') toast('Tap a clip or photo to lay it over the video at the playhead', 2400);
+}
 async function onStripClick(e) {
   const tile = e.target.closest('.media-tile'); if (!tile) return;
   const m = current.media.find((x) => x.id === tile.dataset.id); if (!m) return;
@@ -1278,6 +1685,13 @@ async function onStripClick(e) {
     const c = findClip(current, newId);
     if (c.tlStartUs + clipDurUs(c) > totalUs(current)) toast('Music runs past the end of the cut; it stops where the video ends', 2600);
     else toast('Music added under the cut');
+    return;
+  }
+  if (addTo === 'pip' && (m.kind === 'video' || m.kind === 'image')) {   // v0.45: lay it over the cut at the playhead
+    if (!mainTrack(current).clips.length) { toast('Add a main clip first, then lay a PiP over it'); return; }
+    const oid = bus.do(addOverlayCmd(current, m, view.playheadUs));
+    view.selectClip(oid);
+    toast('Overlay added at the playhead · drag it on the preview', 2400);
     return;
   }
   const newId = bus.do(addClipCmd(current, m));
@@ -1521,7 +1935,17 @@ export function initUI() {
     pullRange: $('#pull-range'), pullWhole: $('#pull-whole'), pullRun: $('#pull-run'), pullBar: $('#pull-bar'),
     pullStatus: $('#pull-status'), pullResult: $('#pull-result'), pullPlayer: $('#pull-player'),
     pullSave: $('#pull-save'), pullShare: $('#pull-share'), pullAdd: $('#pull-add'),
-    tlText: $('#tl-text'), tlTitle: $('#tl-title'), tlAuto: $('#tl-auto'), tlCc: $('#tl-cc'), tlMedia: $('#tl-media'), autoCapRow: $('#auto-cap-row'),
+    tlText: $('#tl-text'), tlTitle: $('#tl-title'),
+    addTo: $('#add-to'), tray: $('.tray'), ovSheet: $('#ov-sheet'), ovName: $('#ov-name'), ovSize: $('#ov-size'), ovSizeVal: $('#ov-size-val'), ovOp: $('#ov-op'), ovOpVal: $('#ov-op-val'),
+    ovPos: $('#ov-pos'), ovRound: $('#ov-round'), ovFade: $('#ov-fade'),
+    ovCut: $('#ov-cut'), ovCutAdj: $('#ov-cut-adj'), ovCutEdge: $('#ov-cut-edge'), ovCutEdgeVal: $('#ov-cut-edge-val'),
+    ovGs: $('#ov-gs'), ovGsPick: $('#ov-gs-pick'), ovGsSwatch: $('#ov-gs-swatch'), ovGsAdj: $('#ov-gs-adj'),
+    ovGsTol: $('#ov-gs-tol'), ovGsTolVal: $('#ov-gs-tol-val'), ovGsSoft: $('#ov-gs-soft'), ovGsSoftVal: $('#ov-gs-soft-val'), ovGsSpill: $('#ov-gs-spill'), ovGsSpillVal: $('#ov-gs-spill-val'),
+    ovKfRow: $('#ov-kf-row'), ovKey: $('#ov-key'), ovKPrev: $('#ov-kprev'), ovKNext: $('#ov-knext'), ovKCount: $('#ov-kcount'), ovKClear: $('#ov-kclear'),
+    csStabRow: $('#cs-stab-row'), csStab: $('#cs-stab'), csStabProg: $('#cs-stab-prog'), csStabBar: $('#cs-stab-bar'), csStabPct: $('#cs-stab-pct'), csStabCancel: $('#cs-stab-cancel'),
+    csRfRow: $('#cs-rf-row'), csRf: $('#cs-rf'), csRfClear: $('#cs-rf-clear'), csRfProg: $('#cs-rf-prog'), csRfBar: $('#cs-rf-bar'), csRfPct: $('#cs-rf-pct'), csRfCancel: $('#cs-rf-cancel'),
+    autoVert: $('#auto-vert'), autoVertProg: $('#auto-vert-prog'), autoVertBar: $('#auto-vert-bar'), autoVertCancel: $('#auto-vert-cancel'), autoVertInfo: $('#auto-vert-info'),
+    csKfRow: $('#cs-kf-row'), csKey: $('#cs-key'), csKPrev: $('#cs-kprev'), csKNext: $('#cs-knext'), csKCount: $('#cs-kcount'), csKClear: $('#cs-kclear'), tlAuto: $('#tl-auto'), tlCc: $('#tl-cc'), tlMedia: $('#tl-media'), autoCapRow: $('#auto-cap-row'),
     autoSheet: $('#auto-sheet'), autoClose: $('#auto-close'), autoPacing: $('#auto-pacing'), autoFind: $('#auto-find'), autoApply: $('#auto-apply'), autoReport: $('#auto-report'),
     autoBeats: $('#auto-beats'), autoSnap: $('#auto-snap'), autoPrevB: $('#auto-prevb'), autoNextB: $('#auto-nextb'), autoBeatsClear: $('#auto-beats-clear'), autoBeatsInfo: $('#auto-beats-info'),
     autoCaptions: $('#auto-captions'), autoCapModel: $('#auto-capmodel'), autoFix: $('#auto-fix'), autoCapClear: $('#auto-cap-clear'), autoCapProgress: $('#auto-cap-progress'), autoCapBar: $('#auto-cap-bar'), autoCapCancel: $('#auto-cap-cancel'),
@@ -1631,6 +2055,33 @@ export function initUI() {
   els.tlTitle.addEventListener('click', addTitleCard);
   els.tlAuto.addEventListener('click', () => openAuto());
   els.tlCc.addEventListener('click', openCaptions);
+  els.addTo.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickAddTo(b.dataset.k); });
+  for (const pre of ['cs', 'ov']) {
+    els[pre + 'Key'].addEventListener('click', () => toggleKey(pre));
+    els[pre + 'KPrev'].addEventListener('click', () => stepKey(-1));
+    els[pre + 'KNext'].addEventListener('click', () => stepKey(1));
+    els[pre + 'KClear'].addEventListener('click', clearKeys);
+  }
+  els.ovSize.addEventListener('input', () => onOvSlide('s'));
+  els.ovSize.addEventListener('change', () => onOvSlideEnd('s'));
+  els.ovOp.addEventListener('input', () => onOvSlide('o'));
+  els.ovOp.addEventListener('change', () => onOvSlideEnd('o'));
+  els.ovPos.addEventListener('click', (e) => { const b = e.target.closest('button[data-p]'); if (b) placeOv(b.dataset.p); });
+  els.ovRound.addEventListener('click', () => toggleOvFlag('round'));
+  els.ovFade.addEventListener('click', () => toggleOvFlag('fade'));
+  els.ovGs.addEventListener('click', toggleGs);
+  els.ovCut.addEventListener('click', toggleCut);
+  els.ovCutEdge.addEventListener('input', onCutSlide);
+  els.ovCutEdge.addEventListener('change', onCutSlideEnd);
+  els.csStab.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickStab(b.dataset.k); });
+  els.csStabCancel.addEventListener('click', cancelStab);
+  els.csRf.addEventListener('click', pickRf);
+  els.csRfClear.addEventListener('click', clearRf);
+  els.csRfCancel.addEventListener('click', cancelRf);
+  els.autoVert.addEventListener('click', makeVertical);
+  els.autoVertCancel.addEventListener('click', cancelRf);
+  els.ovGsPick.addEventListener('click', startGsPick);
+  for (const prop of Object.keys(GS_SLIDERS)) { const id = GS_SLIDERS[prop][1]; els[id].addEventListener('input', () => onGsSlide(prop)); els[id].addEventListener('change', () => onGsSlideEnd(prop)); }
   els.tlMedia.addEventListener('click', showMedia);
   els.autoClose.addEventListener('click', () => openAuto(false));
   els.autoPacing.addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b) pickPacing(b.dataset.k); });

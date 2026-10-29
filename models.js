@@ -25,7 +25,7 @@ function whisper(repo) { return WHISPER_FILES.map((p) => ({ path: p, url: `${HF}
 // Sizes are the published ones (rounded); the real total is measured as it downloads.
 export const MODELS = [
   {
-    id: 'caption-engine', kind: 'engine', label: 'Caption engine', detail: 'ONNX Runtime (runs the caption models on this phone)',
+    id: 'caption-engine', kind: 'engine', label: 'AI engine', detail: 'ONNX Runtime (runs captions and cut-outs on this phone)',
     bytes: 14.4e6, version: ORT_VERSION, license: 'MIT', source: 'onnxruntime-web via jsDelivr',
     files: [
       { path: 'ort-wasm-simd-threaded.mjs', url: ORT_BASE + 'ort-wasm-simd-threaded.mjs' },
@@ -34,13 +34,18 @@ export const MODELS = [
   },
   {
     id: 'whisper-tiny-en', kind: 'captions', label: 'Captions · Small (English)', detail: 'Whisper tiny · fastest, good for clear speech',
-    bytes: 41e6, version: 'onnx-community/whisper-tiny.en_timestamped', license: 'MIT', source: 'huggingface.co', needs: ['caption-engine'],
+    bytes: 45e6, version: 'onnx-community/whisper-tiny.en_timestamped', license: 'MIT', source: 'huggingface.co', needs: ['caption-engine'],
     repo: 'onnx-community/whisper-tiny.en_timestamped', multilingual: false, files: whisper('onnx-community/whisper-tiny.en_timestamped'),
   },
   {
     id: 'whisper-base-en', kind: 'captions', label: 'Captions · Better (English)', detail: 'Whisper base · more accurate, about twice as slow',
-    bytes: 77e6, version: 'onnx-community/whisper-base.en_timestamped', license: 'MIT', source: 'huggingface.co', needs: ['caption-engine'],
+    bytes: 81e6, version: 'onnx-community/whisper-base.en_timestamped', license: 'MIT', source: 'huggingface.co', needs: ['caption-engine'],
     repo: 'onnx-community/whisper-base.en_timestamped', multilingual: false, files: whisper('onnx-community/whisper-base.en_timestamped'),
+  },
+  {
+    id: 'cutout-person', kind: 'cutout', label: 'Cut out person', detail: 'MediaPipe selfie segmentation · removes the background behind people',
+    bytes: 0.5e6, version: 'selfie-onnx-1', license: 'Apache-2.0', source: 'motbuchanan.com', needs: ['caption-engine'],
+    files: [{ path: 'selfie.onnx', url: new URL('selfie.onnx', import.meta.url).href }],   // served from RoughCut's own repo
   },
 ];
 export const modelById = (id) => MODELS.find((m) => m.id === id) || null;

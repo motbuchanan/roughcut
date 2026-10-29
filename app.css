@@ -507,3 +507,41 @@ html, body { overflow: hidden; -webkit-text-size-adjust: 100%; text-size-adjust:
   #app:has(#screen-editor.active) header.topbar { display: none; }
   .stage { min-height: 120px; }
 }
+
+/* ---- v0.45 overlay (PiP) lane + keyframe diamonds ---- */
+:root { --ovl: #b892ff; }
+.tl-olane { position: absolute; left: 0; right: 0; top: 102px; height: 44px; background: rgba(184,146,255,.07); border-top: 1px dashed rgba(184,146,255,.3); pointer-events: none; }
+.tl-oclip {
+  position: absolute; top: 106px; height: 38px; box-sizing: border-box; touch-action: pan-x;
+  border: 2px solid var(--ovl); border-radius: 8px; background: rgba(184,146,255,.18); overflow: visible;
+  transition: transform .12s ease, box-shadow .12s ease; will-change: transform;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+.tl-oclip-thumb { position: absolute; left: 0; top: 0; bottom: 0; width: 34px; border-radius: 6px 0 0 6px; background: #000 center/cover no-repeat; opacity: .85; pointer-events: none; }
+.tl-oclip .tl-aclip-name { left: 40px; }
+.tl-oclip .tl-clip-label { bottom: 2px; left: 40px; }
+.tl-oclip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); z-index: 3; }
+.tl-oclip.lifting { z-index: 8; box-shadow: 0 8px 24px rgba(0,0,0,.6), 0 0 0 2px var(--accent); opacity: .92; transition: none; }
+.tl-oclip.trimming { transition: none; }
+.tl-oclip.overhang { border-right-style: dashed; }
+.tl-oclip.selected .tl-handle { display: block; }
+.tl-keys { position: absolute; left: 0; right: 0; bottom: -5px; height: 10px; pointer-events: none; z-index: 2; }
+.tl-keys i { position: absolute; top: 0; width: 8px; height: 8px; margin-left: -4px; background: #ffd23f; border: 1px solid #0b1a20; transform: rotate(45deg); }
+/* add-to switch in the media tray */
+.tray-head .seg#add-to { flex: 0 0 auto; margin-left: auto; }
+.tray-head .seg#add-to button { min-height: 32px; padding: 0 10px; font-size: 12px; }
+.tray-head #add-to + #import-btn { margin-left: 8px; }
+.tray.pip-mode .media-tile { border-color: var(--ovl); }
+/* overlay + keyframe rows */
+.kf-row .kf-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.kf-row .tlbtn.on { background: #ffd23f; color: #17130a; border-color: #ffd23f; }
+.ov-pos button { min-width: 38px; }
+
+/* v0.46 green screen */
+.gs-swatch { width: 30px; height: 30px; border-radius: 8px; border: 2px solid var(--line); flex: 0 0 auto; }
+#ov-gs.on { background: #2fbf5b; color: #06210f; border-color: #2fbf5b; }
+#ov-gs-pick.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+#preview.picking { cursor: crosshair; }
+
+/* v0.48 cut out person */
+#ov-cut.on { background: var(--ovl); color: #160b2e; border-color: var(--ovl); }

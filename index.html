@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <span class="wordmark"><span class="rough">Rough</span><span class="cut">Cut</span></span>
-      <button id="badge" class="badge" title="Tap for version">v0.44 &middot; Oct 28</button>
+      <button id="badge" class="badge" title="Tap for version">v0.49 &middot; Oct 29</button>
     </header>
 
     <main>
@@ -97,6 +97,15 @@
               <button id="auto-beats-clear" class="tlbtn hidden" aria-label="Clear beat markers">&times;</button>
             </div>
             <div class="ts-hint" id="auto-beats-info">Marks every beat of the selected music clip on the ruler. With Snap on, clip edges and moves land on the beat.</div>
+            <div class="cs-row" id="auto-vert-row">
+              <span class="cs-label">Vertical</span>
+              <button id="auto-vert" class="tlbtn wide grow">Make it vertical</button>
+            </div>
+            <div class="cs-row hidden" id="auto-vert-prog">
+              <div class="prog grow"><i id="auto-vert-bar"></i></div>
+              <button id="auto-vert-cancel" class="tlbtn">Cancel</button>
+            </div>
+            <div class="ts-hint" id="auto-vert-info">Switches to 9:16 and keeps the person in shot on every main-track video. The frame holds still and only moves when they do. Uses the Cut out person download.</div>
             <div class="cs-row" id="auto-cap-row">
               <span class="cs-label">Captions</span>
               <button id="auto-captions" class="tlbtn wide grow">Auto captions</button>
@@ -179,6 +188,33 @@
               <input type="range" id="cs-zoom" class="cs-vol" min="100" max="300" step="5" value="100" />
               <span class="cs-val" id="cs-zoom-val">1.0&times;</span>
             </div>
+            <div data-tab="picture" class="cs-row hidden" id="cs-stab-row">
+              <span class="cs-label">Steady</span>
+              <div class="seg" id="cs-stab"><button data-k="off">Off</button><button data-k="light">Light</button><button data-k="medium">Medium</button><button data-k="strong">Strong</button></div>
+            </div>
+            <div data-tab="picture" class="cs-row hidden" id="cs-stab-prog">
+              <div class="prog grow"><i id="cs-stab-bar"></i></div>
+              <span class="cs-val" id="cs-stab-pct"></span>
+              <button id="cs-stab-cancel" class="tlbtn">Cancel</button>
+            </div>
+            <div data-tab="picture" class="cs-row hidden" id="cs-rf-row">
+              <span class="cs-label">Follow</span>
+              <button id="cs-rf" class="tlbtn wide grow">Follow person</button>
+              <button id="cs-rf-clear" class="tlbtn hidden" aria-label="Stop following">&times;</button>
+            </div>
+            <div data-tab="picture" class="cs-row hidden" id="cs-rf-prog">
+              <div class="prog grow"><i id="cs-rf-bar"></i></div>
+              <span class="cs-val" id="cs-rf-pct"></span>
+              <button id="cs-rf-cancel" class="tlbtn">Cancel</button>
+            </div>
+            <div data-tab="picture" class="cs-row hidden kf-row" id="cs-kf-row">
+              <span class="cs-label">Motion</span>
+              <button id="cs-key" class="tlbtn wide" aria-pressed="false" title="Keyframe at the playhead">&#9670; Key</button>
+              <button id="cs-kprev" class="tlbtn" aria-label="Previous keyframe">&#8249;&#9670;</button>
+              <button id="cs-knext" class="tlbtn" aria-label="Next keyframe">&#9670;&#8250;</button>
+              <span class="kf-count" id="cs-kcount"></span>
+              <button id="cs-kclear" class="tlbtn hidden" aria-label="Remove all keyframes">&times;</button>
+            </div>
             <div data-tab="color" class="cs-row hidden" id="cs-look-row">
               <span class="cs-label">Look</span>
               <div class="seg scroll" id="cs-look"></div>
@@ -221,6 +257,52 @@
               <button id="cs-detach" class="tlbtn wide grow">Detach audio</button>
               <button id="cs-pull" class="tlbtn wide grow">Pull audio to file&hellip;</button>
             </div>
+          </div>
+          <div class="clip-sheet hidden" id="ov-sheet">
+            <span class="cs-name" id="ov-name"></span>
+            <div class="cs-row">
+              <span class="cs-label">Size</span>
+              <input type="range" id="ov-size" class="cs-vol" min="10" max="100" step="1" value="42" />
+              <span class="cs-val" id="ov-size-val">42%</span>
+            </div>
+            <div class="cs-row">
+              <span class="cs-label">Opacity</span>
+              <input type="range" id="ov-op" class="cs-vol" min="0" max="100" step="5" value="100" />
+              <span class="cs-val" id="ov-op-val">100%</span>
+            </div>
+            <div class="cs-row">
+              <span class="cs-label">Place</span>
+              <div class="seg ov-pos" id="ov-pos"><button data-p="tl" aria-label="Top left">&#8598;</button><button data-p="tr" aria-label="Top right">&#8599;</button><button data-p="c" aria-label="Centre">&#9673;</button><button data-p="bl" aria-label="Bottom left">&#8601;</button><button data-p="br" aria-label="Bottom right">&#8600;</button></div>
+            </div>
+            <div class="cs-row">
+              <button id="ov-round" class="tlbtn wide grow" aria-pressed="true">Round corners</button>
+              <button id="ov-fade" class="tlbtn wide grow" aria-pressed="false">Fade in/out</button>
+            </div>
+            <div class="cs-row">
+              <button id="ov-cut" class="tlbtn wide grow" aria-pressed="false">Cut out person</button>
+            </div>
+            <div class="cs-row cs-adj hidden" id="ov-cut-adj">
+              <label><span>Edge</span><input type="range" id="ov-cut-edge" min="0" max="100" step="5" value="35" /><b id="ov-cut-edge-val">35</b></label>
+            </div>
+            <div class="cs-row">
+              <button id="ov-gs" class="tlbtn wide grow" aria-pressed="false">Green screen</button>
+              <button id="ov-gs-pick" class="tlbtn wide hidden" aria-pressed="false">Pick colour</button>
+              <span class="gs-swatch hidden" id="ov-gs-swatch"></span>
+            </div>
+            <div class="cs-row cs-adj hidden" id="ov-gs-adj">
+              <label><span>Strength</span><input type="range" id="ov-gs-tol" min="4" max="50" step="1" value="22" /><b id="ov-gs-tol-val">22</b></label>
+              <label><span>Edge</span><input type="range" id="ov-gs-soft" min="0" max="30" step="1" value="10" /><b id="ov-gs-soft-val">10</b></label>
+              <label><span>Spill</span><input type="range" id="ov-gs-spill" min="0" max="100" step="5" value="60" /><b id="ov-gs-spill-val">60</b></label>
+            </div>
+            <div class="cs-row kf-row" id="ov-kf-row">
+              <span class="cs-label">Motion</span>
+              <button id="ov-key" class="tlbtn wide" aria-pressed="false" title="Keyframe at the playhead">&#9670; Key</button>
+              <button id="ov-kprev" class="tlbtn" aria-label="Previous keyframe">&#8249;&#9670;</button>
+              <button id="ov-knext" class="tlbtn" aria-label="Next keyframe">&#9670;&#8250;</button>
+              <span class="kf-count" id="ov-kcount"></span>
+              <button id="ov-kclear" class="tlbtn hidden" aria-label="Remove all keyframes">&times;</button>
+            </div>
+            <div class="ts-hint" id="ov-hint">Drag it on the preview to move it. Tap &#9670; Key at two moments and change it between them to make it slide, grow or fade.</div>
           </div>
           <div class="pull-sheet hidden" id="pull-sheet">
             <div class="pull-head">
@@ -265,6 +347,7 @@
         <div class="tray">
           <div class="tray-head">
             <span class="label">Media</span>
+            <div class="seg" id="add-to" aria-label="Where a tapped clip goes"><button data-k="main" aria-pressed="true">Main</button><button data-k="pip" aria-pressed="false">PiP</button></div>
             <button id="import-btn" class="primary">+ Import</button>
             <input type="file" id="file-input" accept="video/*,image/*,audio/*" multiple hidden />
             <input type="file" id="lut-input" accept=".cube,text/plain" hidden />

@@ -7,6 +7,8 @@ import { US, uid, usToS, sToUs, clipDurUs, clipSpeed, tlToSrcUs, SPEEDS } from '
 export { clipDurUs, clipSpeed, tlToSrcUs, SPEEDS };
 import { textTrack, textDurUs, removeTextCmd, setTextCmd, TEXT_MIN_US } from './text.js';
 import { allBeatTlUs } from './beats.js';
+import { overlayTrack } from './overlay.js';
+import { hasKeys, keyTlUs } from './keyframes.js';
 
 export const DEFAULT_IMAGE_US = 5 * US;   // an image clip's default length
 export const MIN_CLIP_US = 100_000;       // 0.1s floor so clips never vanish
@@ -22,13 +24,21 @@ export function audioTrack(project) {
 export function findClip(project, id) {
   return mainTrack(project).clips.find((c) => c.id === id)
     || audioTrack(project).clips.find((c) => c.id === id)
+    || overlayTrack(project).clips.find((c) => c.id === id)
     || textTrack(project).items.find((c) => c.id === id) || null;
 }
 export function laneOf(project, id) {
   if (mainTrack(project).clips.some((c) => c.id === id)) return 'v';
   if (audioTrack(project).clips.some((c) => c.id === id)) return 'a';
+  if (overlayTrack(project).clips.some((c) => c.id === id)) return 'o';
   if (textTrack(project).items.some((c) => c.id === id)) return 't';
   return null;
+}
+// The free-positioned lane (music a1 or overlay o1) that holds a clip (v0.45).
+function freeTrack(project, id) {
+  const a = audioTrack(project); if (a.clips.some((c) => c.id === id)) return a;
+  const o = overlayTrack(project); if (o.clips.some((c) => c.id === id)) return o;
+  return a;
 }
 // Color card media: a solid-color "clip" for title cards. Lives in project.media like any import.
 export function makeColorMedia(color = '#000000') {
@@ -112,28 +122,28 @@ export function addAudioCmd(project, media, atUs) {
   };
 }
 export function removeAudioCmd(project, clipId) {
-  const t = audioTrack(project);
+  const t = freeTrack(project, clipId);
   let removed = null, idx = -1;
   return {
-    label: 'Remove music',
+    label: t.id === 'o1' ? 'Remove overlay' : 'Remove music',
     do() { idx = t.clips.findIndex((c) => c.id === clipId); if (idx >= 0) removed = t.clips.splice(idx, 1)[0]; },
     undo() { if (removed && idx >= 0) t.clips.splice(idx, 0, removed); },
   };
 }
 export function moveAudioCmd(project, clipId, newStartUs) {
-  const t = audioTrack(project);
+  const t = freeTrack(project, clipId);
   let old = 0;
   return {
-    label: 'Move music',
+    label: t.id === 'o1' ? 'Move overlay' : 'Move music',
     do() { const c = t.clips.find((x) => x.id === clipId); if (!c) return; old = c.tlStartUs; c.tlStartUs = Math.max(0, newStartUs); t.clips.sort((a, b) => a.tlStartUs - b.tlStartUs); },
     undo() { const c = t.clips.find((x) => x.id === clipId); if (!c) return; c.tlStartUs = old; t.clips.sort((a, b) => a.tlStartUs - b.tlStartUs); },
   };
 }
 export function trimAudioCmd(project, clipId, newInUs, newOutUs, newStartUs) {
-  const t = audioTrack(project);
+  const t = freeTrack(project, clipId);
   let oldIn = 0, oldOut = 0, oldStart = 0;
   return {
-    label: 'Trim music',
+    label: t.id === 'o1' ? 'Trim overlay' : 'Trim music',
     do() { const c = t.clips.find((x) => x.id === clipId); if (!c) return; oldIn = c.inUs; oldOut = c.outUs; oldStart = c.tlStartUs; c.inUs = newInUs; c.outUs = newOutUs; c.tlStartUs = newStartUs; },
     undo() { const c = t.clips.find((x) => x.id === clipId); if (!c) return; c.inUs = oldIn; c.outUs = oldOut; c.tlStartUs = oldStart; },
   };
@@ -375,6 +385,7 @@ export class TimelineView {
     this._els = new Map();               // clipId -> element (video lane)
     this._aels = new Map();              // clipId -> element (audio lane)
     this._tels = new Map();              // itemId -> element (text lane)
+    this._oels = new Map();              // clipId -> element (overlay lane, v0.45)
     this._padPx = 0;
 
     const s = this.scrollEl, t = this.trackEl;
@@ -465,7 +476,7 @@ export class TimelineView {
         el = document.createElement('div');
         el.className = 'tl-clip';
         el.dataset.id = c.id;
-        el.innerHTML = '<div class="tl-clip-thumb"></div><span class="tl-clip-label"></span>'
+        el.innerHTML = '<div class="tl-clip-thumb"></div><span class="tl-clip-label"></span><div class="tl-keys"></div>'
           + '<div class="tl-handle tl-handle-l" data-handle="l"></div><div class="tl-handle tl-handle-r" data-handle="r"></div>';
         const url = this.getThumb ? this.getThumb(c.mediaId) : null;
         const m = this.getMedia ? this.getMedia(c.mediaId) : null;
@@ -491,6 +502,27 @@ export class TimelineView {
           + '<div class="tl-handle tl-handle-l" data-handle="l"></div><div class="tl-handle tl-handle-r" data-handle="r"></div>';
         el.querySelector('.tl-aclip-name').textContent = '\u266a ' + ((m && m.name) ? m.name.replace(/\.[^.]+$/, '') : 'music');
         this._aels.set(c.id, el);
+      }
+      this.trackEl.appendChild(el);
+    }
+    // overlay lane (v0.45)
+    const ot = overlayTrack(this.project);
+    for (const [id, el] of this._oels) {
+      if (!ot.clips.some((c) => c.id === id)) { el.remove(); this._oels.delete(id); }
+    }
+    for (const c of ot.clips) {
+      let el = this._oels.get(c.id);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'tl-oclip';
+        el.dataset.id = c.id;
+        const m = this.getMedia(c.mediaId);
+        el.innerHTML = '<div class="tl-oclip-thumb"></div><span class="tl-aclip-name"></span><span class="tl-clip-label"></span><div class="tl-keys"></div>'
+          + '<div class="tl-handle tl-handle-l" data-handle="l"></div><div class="tl-handle tl-handle-r" data-handle="r"></div>';
+        el.querySelector('.tl-aclip-name').textContent = '\u25a3 ' + ((m && m.name) ? m.name.replace(/\.[^.]+$/, '') : 'overlay');
+        const url = this.getThumb ? this.getThumb(c.mediaId) : null;
+        if (url) el.querySelector('.tl-oclip-thumb').style.backgroundImage = `url("${url}")`;
+        this._oels.set(c.id, el);
       }
       this.trackEl.appendChild(el);
     }
@@ -528,13 +560,38 @@ export class TimelineView {
       el.classList.toggle('muted', !!c.muted);
       // teal diamond at the front cut when this clip has a transition-in
       el.classList.toggle('has-trans', i > 0 && !!(c.transIn && c.transIn.type && c.transIn.type !== 'none'));
+      this._layoutKeys(el, c);
     });
+    // Lanes stack under the main track: overlays, then music, then text (v0.45: tops set here,
+    // so any combination of lanes lays out without a CSS rule per combination).
+    let y = 102;
+    const ot = overlayTrack(this.project);
+    let olane = this.trackEl.querySelector('.tl-olane');
+    if (!olane) { olane = document.createElement('div'); olane.className = 'tl-olane'; this.trackEl.prepend(olane); }
+    olane.style.display = ot.clips.length ? '' : 'none';
+    if (ot.clips.length) {
+      olane.style.top = y + 'px';
+      for (const c of ot.clips) {
+        const el = this._oels.get(c.id); if (!el) continue;
+        const shown = Math.min(clipDurUs(c), Math.max(0, total - c.tlStartUs));
+        el.style.top = (y + 4) + 'px';
+        el.style.left = this._tlX(c.tlStartUs) + 'px';
+        el.style.width = Math.max(8, this._usToPx(clipDurUs(c))) + 'px';
+        el.classList.toggle('selected', c.id === this.selectedId);
+        el.classList.toggle('overhang', c.tlStartUs + clipDurUs(c) > total);
+        el.querySelector('.tl-clip-label').textContent = fmtTime(shown) + (shown < clipDurUs(c) ? ' \u2702' : '');
+        this._layoutKeys(el, c);
+      }
+      y += 46;
+    }
     const a = audioTrack(this.project);
     let lane = this.trackEl.querySelector('.tl-alane');
     if (!lane) { lane = document.createElement('div'); lane.className = 'tl-alane'; this.trackEl.prepend(lane); }
     lane.style.display = a.clips.length ? '' : 'none';
+    lane.style.top = y + 'px';
     for (const c of a.clips) {
       const el = this._aels.get(c.id); if (!el) continue;
+      el.style.top = (y + 4) + 'px';
       const shown = Math.min(clipDurUs(c), Math.max(0, total - c.tlStartUs));
       el.style.left = this._tlX(c.tlStartUs) + 'px';
       el.style.width = Math.max(8, this._usToPx(clipDurUs(c))) + 'px';
@@ -545,12 +602,15 @@ export class TimelineView {
       el.querySelector('.tl-clip-label').textContent = fmtTime(shown) + (shown < clipDurUs(c) ? ' \u2702' : '');
     }
     this.trackEl.classList.toggle('has-audio', a.clips.length > 0);
+    if (a.clips.length) y += 48;
     const tt = textTrack(this.project);
     let tlane = this.trackEl.querySelector('.tl-tlane');
     if (!tlane) { tlane = document.createElement('div'); tlane.className = 'tl-tlane'; this.trackEl.prepend(tlane); }
     tlane.style.display = tt.items.length ? '' : 'none';
+    tlane.style.top = y + 'px';
     for (const c of tt.items) {
       const el = this._tels.get(c.id); if (!el) continue;
+      el.style.top = (y + 3) + 'px';
       el.style.left = this._tlX(c.tlStartUs) + 'px';
       el.style.width = Math.max(8, this._usToPx(textDurUs(c))) + 'px';
       el.style.display = textDurUs(c) > 0 ? '' : 'none';   // a caption whose words were cut away hides until the cut brings them back
@@ -559,8 +619,22 @@ export class TimelineView {
       el.querySelector('.tl-tclip-text').textContent = (c.cap ? 'CC ' : 'T ') + String(c.text || '').split('\n')[0];
     }
     this.trackEl.classList.toggle('has-text', tt.items.length > 0);
+    if (tt.items.length) y += 34;
+    this.trackEl.style.height = Math.max(104, y + 2) + 'px';
     this._layoutRuler(total);
     this._updateTime(total);
+  }
+
+  // Keyframe diamonds along a clip (v0.45).
+  _layoutKeys(el, c) {
+    const box = el.querySelector('.tl-keys'); if (!box) return;
+    if (!hasKeys(c)) { if (box.childElementCount) box.innerHTML = ''; return; }
+    const html = [];
+    for (const k of c.kf) {
+      if (k.t < c.inUs - 1000 || k.t > c.outUs + 1000) continue;
+      html.push(`<i style="left:${Math.round(this._usToPx(keyTlUs(c, k) - c.tlStartUs))}px"></i>`);
+    }
+    const s = html.join(''); if (box.innerHTML !== s) box.innerHTML = s;
   }
 
   _renderRuler() {
@@ -671,7 +745,7 @@ export class TimelineView {
     const id = this.selectedId;
     const lane = laneOf(this.project, id);
     this.selectedId = null;
-    this.bus.do(lane === 'a' ? removeAudioCmd(this.project, id) : lane === 't' ? removeTextCmd(this.project, id) : removeClipCmd(this.project, id));
+    this.bus.do((lane === 'a' || lane === 'o') ? removeAudioCmd(this.project, id) : lane === 't' ? removeTextCmd(this.project, id) : removeClipCmd(this.project, id));
   }
   splitAtPlayhead() {
     const idx = clipIndexAt(this.project, this.playheadUs);
@@ -687,7 +761,7 @@ export class TimelineView {
   _onPointerDown(e) {
     if (this._pinch) return;
     const handle = e.target.closest('.tl-handle');
-    const clipEl = e.target.closest('.tl-clip, .tl-aclip, .tl-tclip');
+    const clipEl = e.target.closest('.tl-clip, .tl-aclip, .tl-oclip, .tl-tclip');
     this._clearPress();
     if (handle && clipEl && clipEl.classList.contains('selected')) {
       this.trackEl.setPointerCapture(e.pointerId);
@@ -711,7 +785,7 @@ export class TimelineView {
     this._press = null;
     try { this.trackEl.setPointerCapture(d.pid); } catch (_) {}
     const lane = laneOf(this.project, d.id);
-    const el = lane === 'a' ? this._aels.get(d.id) : lane === 't' ? this._tels.get(d.id) : this._els.get(d.id);
+    const el = this._elFor(lane, d.id);
     if (!el) return;
     d.mode = lane === 'v' ? 'reorder' : 'slide'; d.el = el; d.lastX = e.clientX; d.lane = lane;
     d.origStart = findClip(this.project, d.id).tlStartUs;
@@ -745,7 +819,7 @@ export class TimelineView {
           if (b != null) dSrc = Math.round((b - d.origStart) * clipSpeed(clip));
         }
         const newIn = Math.max(0, Math.min(d.origIn + dSrc, clip.outUs - MIN_CLIP_US));
-        if (d.lane === 'a') clip.tlStartUs = Math.max(0, d.origStart + Math.round((newIn - d.origIn) / clipSpeed(clip)));   // music keeps its place on the timeline
+        if (d.lane === 'a' || d.lane === 'o') clip.tlStartUs = Math.max(0, d.origStart + Math.round((newIn - d.origIn) / clipSpeed(clip)));   // music keeps its place on the timeline
         clip.inUs = newIn;
       } else {
         let dSrc = Math.round(dUs * clipSpeed(clip));
@@ -795,7 +869,7 @@ export class TimelineView {
       clip.inUs = d.origIn; clip.outUs = d.origOut; clip.tlStartUs = d.origStart; // revert, then commit as one undoable step
       if (newIn !== d.origIn || newOut !== d.origOut || newStart !== d.origStart) {
         if (d.lane === 't') this.bus.do(setTextCmd(this.project, d.id, { tlStartUs: newStart, outUs: newOut }, 'Trim text'));
-        else this.bus.do(d.lane === 'a' ? trimAudioCmd(this.project, d.id, newIn, newOut, newStart) : trimClipCmd(this.project, d.id, newIn, newOut));
+        else this.bus.do((d.lane === 'a' || d.lane === 'o') ? trimAudioCmd(this.project, d.id, newIn, newOut, newStart) : trimClipCmd(this.project, d.id, newIn, newOut));
       } else this._layout();
       return;
     }
@@ -831,7 +905,7 @@ export class TimelineView {
     this._stopEdgeScroll();
   }
   _clearPress() { if (this._press) { clearTimeout(this._press); this._press = null; } }
-  _elFor(lane, id) { return (lane === 'a' ? this._aels : lane === 't' ? this._tels : this._els).get(id); }
+  _elFor(lane, id) { return (lane === 'a' ? this._aels : lane === 'o' ? this._oels : lane === 't' ? this._tels : this._els).get(id); }
 
   _indexForClientX(clientX) {
     const us = this._contentUs(clientX);

@@ -57,6 +57,8 @@ export function drawFrame(ctx, W, H, img, fw, fh, clip) {
   ctx.translate(W / 2 + f.x * W, H / 2 + f.y * H);
   if (f.rot) ctx.rotate(f.rot * Math.PI / 180);
   ctx.scale(s, s);
+  const st = clip && clip._stab;   // stabilisation correction (v0.47): shift + turn inside the frame, constant zoom
+  if (st) { ctx.scale(st.z, st.z); ctx.rotate(st.a); ctx.translate(st.x * fw, st.y * fh); }
   ctx.drawImage(img, -fw / 2, -fh / 2, fw, fh);
   ctx.restore();
 }

@@ -95,6 +95,10 @@ import { renderTimelineAudio } from './audio.js';
 import { drawFrame, fitBox } from './frame.js';
 import { gradeFrame, lookOf, hasLut, registerLut } from './color.js';
 import { readLut } from './state.js';
+import { clipAt } from './keyframes.js';
+import { overlayTrack, ovStateAt, drawOverlay } from './overlay.js';
+import { keyOn, keyFrame } from './chroma.js';
+import { cutOn, cutFrame, loadCutout } from './cutout.js';
 import { muxAudioWithFfmpeg, audioBufferToWav } from './ffmpeg-audio.js';
 
 export async function canExport(codec = 'avc') {
@@ -384,10 +388,11 @@ export function exportProject(project, opts = {}) {
     segs.forEach((s, k) => { if (s.kind === 'solo') lastUse.set(s.ci, k); else { lastUse.set(s.ai, k); lastUse.set(s.bi, k); } });
 
     // Draw a static (image/color/none) source, or a decoded frame canvas, into a ctx.
-    const paintStatic = (c, src, frame) => {
+    const paintStatic = (c, src, frame, srcUs = 0) => {
       c.fillStyle = (src.kind === 'color') ? src.color : bg; c.fillRect(0, 0, W, H);
-      if (src.kind === 'image' && src.bmp) drawFrame(c, W, H, gradeFrame(src.bmp, src.bmp.width, src.bmp.height, src.clip), src.bmp.width, src.bmp.height, src.clip);
-      else if (frame) drawFrame(c, W, H, gradeFrame(frame, src.fw, src.fh, src.clip), src.fw, src.fh, src.clip);
+      const kc = src.clip ? clipAt(src.clip, srcUs, src.kind === 'video' && src.lastTs != null ? src.lastTs : null) : src.clip;   // keys (v0.45) + steady by the decoded frame (v0.47)
+      if (src.kind === 'image' && src.bmp) drawFrame(c, W, H, gradeFrame(src.bmp, src.bmp.width, src.bmp.height, src.clip), src.bmp.width, src.bmp.height, kc);
+      else if (frame) drawFrame(c, W, H, gradeFrame(frame, src.fw, src.fh, src.clip), src.fw, src.fh, kc);
     };
     // Sequential frame iterator for a source over a list of source times (us).
     // Non-video sources yield null every frame (paintStatic handles them).
@@ -396,7 +401,7 @@ export function exportProject(project, opts = {}) {
       const tss = srcUsList.map((us) => usToS(clampSrc(us, src.media)));
       let k = 0;
       try {
-        for await (const wrapped of src.sink.canvasesAtTimestamps(tss)) { k++; yield (wrapped && wrapped.canvas) || undefined; }
+        for await (const wrapped of src.sink.canvasesAtTimestamps(tss)) { k++; if (wrapped) src.lastTs = Math.round(wrapped.timestamp * 1e6); yield (wrapped && wrapped.canvas) || undefined; }
       } catch (err) {
         // A hardware decoder can error on a frame (older phones at higher fps/res).
         // Don't throw a multi-minute render away: hold the last good frame.
@@ -404,6 +409,55 @@ export function exportProject(project, opts = {}) {
         console.warn('export: decode fell back at frame', k, 'of', tss.length, err);
       }
       for (; k < srcUsList.length; k++) yield undefined;   // undefined = "reuse last"
+    }
+
+    // ---- PiP overlays (v0.45): each overlay clip decodes in its own sequential pass over
+    // exactly the frames it covers, drawn after the main picture and before text/captions.
+    const pips = [];
+    for (const oc of overlayTrack(project).clips) {
+      const m = mediaOf(oc); if (!m || (m.kind !== 'video' && m.kind !== 'image')) continue;
+      const idx = [];
+      for (let i = 0; i < totalFrames; i++) { const t = frameTimesUs[i]; if (t >= oc.tlStartUs && t < oc.tlStartUs + clipDurUs(oc)) idx.push(i); }
+      if (idx.length) pips.push({ clip: oc, media: m, i0: idx[0], i1: idx[idx.length - 1], src: idx.map((i) => oc.inUs + Math.round(frameTimesUs[i] - oc.tlStartUs)), k: 0, it: null, last: null, open: false, done: false });
+    }
+    if (pips.some((p) => cutOn(p.clip))) {
+      try { await loadCutout(); } catch (e) { throw new Error('Cut out person needs its model: download it under On-device models. (' + (e && e.message ? e.message : e) + ')'); }
+    }
+    async function openPip(p) {
+      p.open = true;
+      try {
+        const f = await readMedia(project.id, p.media.opfs);
+        if (p.media.kind === 'image') { p.bmp = await createImageBitmap(f); return; }
+        p.input = new Input({ formats: ALL_FORMATS, source: new BlobSource(f) });
+        const vtrack = await p.input.getPrimaryVideoTrack();
+        if (!vtrack) return;
+        const box = fitBox(p.media.w, p.media.h, W, H);
+        p.fw = box.w; p.fh = box.h;
+        p.it = framesOf({ kind: 'video', sink: new CanvasSink(vtrack, { width: box.w, height: box.h, fit: 'contain', poolSize: 2 }), media: p.media }, p.src);
+      } catch (e) { console.warn('export: overlay offline', p.media.name, e); }
+    }
+    function closePip(p) {
+      p.done = true;
+      if (p.input) { try { p.input.dispose(); } catch (_) {} p.input = null; }
+      if (p.bmp) { try { p.bmp.close?.(); } catch (_) {} p.bmp = null; }
+    }
+    async function paintPip(i) {
+      for (const p of pips) {
+        if (p.done || i < p.i0) continue;
+        if (!p.open) await openPip(p);
+        let img = null, fw = 0, fh = 0;
+        if (p.bmp) { img = p.bmp; fw = img.width; fh = img.height; }
+        else if (p.it) {
+          const r = await p.it.next();
+          const fr = r.value === undefined ? p.last : r.value; if (fr !== undefined && fr !== null) p.last = fr;
+          if (p.last) { img = p.last; fw = p.fw; fh = p.fh; }
+        }
+        let cut = false;
+        if (img && cutOn(p.clip)) { img = await cutFrame(img, fw, fh, p.clip); cut = true; }   // cut out person (v0.48)
+        else if (img && keyOn(p.clip)) img = keyFrame(img, fw, fh, p.clip);   // green screen (v0.46)
+        if (img) drawOverlay(ctx, W, H, img, fw, fh, ovStateAt(p.clip, frameTimesUs[i]), cut || keyOn(p.clip));
+        if (i >= p.i1) closePip(p);
+      }
     }
 
     const scratchA = makeCanvas(W, H), scratchB = makeCanvas(W, H);
@@ -423,7 +477,8 @@ export function exportProject(project, opts = {}) {
           const r = await it.next();
           const frame = r.value === undefined ? last : r.value;
           if (frame !== undefined) last = frame;
-          paintStatic(ctx, src, frame);
+          paintStatic(ctx, src, frame, seg.src[k]);
+          await paintPip(i);
           paintOverlays(i);
           await emit(i);
         }
@@ -437,9 +492,10 @@ export function exportProject(project, opts = {}) {
           const [ra, rb] = await Promise.all([itA.next(), itB.next()]);
           const fa = ra.value === undefined ? lastA : ra.value; if (fa !== undefined) lastA = fa;
           const fb = rb.value === undefined ? lastB : rb.value; if (fb !== undefined) lastB = fb;
-          paintStatic(ctxA, srcA, fa);
-          paintStatic(ctxB, srcB, fb);
+          paintStatic(ctxA, srcA, fa, seg.srcA[k]);
+          paintStatic(ctxB, srcB, fb, seg.srcB[k]);
           drawDualTransition(ctx, W, H, seg.type, seg.dir, seg.xs[k], scratchA, scratchB);
+          await paintPip(i);
           paintOverlays(i);
           await emit(i);
         }
@@ -448,6 +504,7 @@ export function exportProject(project, opts = {}) {
       for (const [ci, k] of lastUse) if (k === sIdx) disposeSource(ci);
     }
     for (const ci of [...sources.keys()]) disposeSource(ci);
+    for (const p of pips) closePip(p);
 
     await Promise.all(inflight);   // drain the encoder queue before finalizing
     onProgress(0.98);

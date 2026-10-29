@@ -1,0 +1,15 @@
+RoughCut · third-party parts (Oct 29 2026)
+
+mediabunny.js            Mediabunny, MPL-2.0
+transformers.min.js      Transformers.js (Hugging Face), Apache-2.0
+ort-web.min.js           ONNX Runtime Web (Microsoft), MIT
+selfie.onnx              MediaPipe Selfie Segmentation model (Google), Apache-2.0.
+                         Converted from selfie_segmentation.tflite (npm @mediapipe/selfie_segmentation
+                         0.1.1675465747) to ONNX; the custom transpose-conv op was rewritten as a
+                         standard ConvTranspose. Output matches the original to within 1e-7.
+ffmpeg/                  ffmpeg.wasm (core), LGPL-2.1+ / MIT wrapper
+fonts                    Anton, Bebas Neue, Caveat, Creepster: SIL Open Font License 1.1
+
+Downloaded on request into this phone (never bundled):
+  ONNX Runtime wasm engine (jsDelivr), MIT
+  Whisper tiny.en / base.en timestamped ONNX (Hugging Face onnx-community), MIT

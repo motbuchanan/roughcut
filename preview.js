@@ -13,6 +13,12 @@ import { drawTransitionAt, drawDualTransition } from './transitions.js';
 import { drawFrame, drawSafeZones } from './frame.js';
 import { gradeFrame, lookOf, hasLut, registerLut } from './color.js';
 import { readLut } from './state.js';
+import { clipAt } from './keyframes.js';
+import { overlaysAt, ovStateAt, drawOverlay } from './overlay.js';
+import { keyOn, keyFrame } from './chroma.js';
+import { cutOn, cutFrame } from './cutout.js';
+import { normalize } from './timeline.js';
+import { fitBox } from './frame.js';
 
 export function draftSize(canvas, maxEdge = 720) {
   const ar = canvas.w / canvas.h;
@@ -38,6 +44,8 @@ export class Preview {
     this.tlUs = 0;
     this.showSafe = false;  // preview-only safe-zone guide
     this._scratch = null; // [canvasA, canvasB] for dual composites
+    this.ovReaders = new Map();   // overlay clipId -> source state (v0.45)
+    this.ovBoxes = [];            // overlay hit boxes from the last paint (canvas px)
     // once bundled fonts (Creepster) load, repaint so a spooky title stops
     // showing in the fallback font.
     ensureFonts().then(() => this.repaintOverlay());
@@ -109,9 +117,10 @@ export class Preview {
   // so repaints while dragging text or reframing never re-decode.
   async _paint(c, st, sourceSec, clip) {
     const W = this.canvas.width, H = this.canvas.height;
+    const clipIn = clip;
     if (st.kind === 'color') { this.clear(st.color, c); return true; }
     await this._ensureLut(clip);
-    if (st.kind === 'image') { this.clear(undefined, c); drawFrame(c, W, H, gradeFrame(st.bitmap, st.bitmap.width, st.bitmap.height, clip), st.bitmap.width, st.bitmap.height, clip); return true; }
+    if (st.kind === 'image') { const kc = clipAt(clipIn, Math.round(Math.max(0, sourceSec) * 1e6)); this.clear(undefined, c); drawFrame(c, W, H, gradeFrame(st.bitmap, st.bitmap.width, st.bitmap.height, clip), st.bitmap.width, st.bitmap.height, kc); return true; }
     if (!st.sink) { this.clear(undefined, c); return true; }
     const sec = Math.max(0, sourceSec);
     if (!(st.cache && st.cacheSec === sec)) {
@@ -122,9 +131,10 @@ export class Preview {
           st.cache = document.createElement('canvas'); st.cache.width = st.frameW; st.cache.height = st.frameH;
         }
         const cc = st.cache.getContext('2d'); cc.clearRect(0, 0, st.frameW, st.frameH); cc.drawImage(wrapped.canvas, 0, 0, st.frameW, st.frameH);
-        st.cacheSec = sec;
+        st.cacheSec = sec; st.cacheTs = Math.round(wrapped.timestamp * 1e6);
       } else st.cacheSec = -1;
     }
+    clip = clipAt(clipIn, Math.round(sec * 1e6), st.cacheTs != null ? st.cacheTs : null);   // keys (v0.45) + steady (v0.47, by the frame actually shown)
     this.clear(undefined, c);
     if (st.cache && st.cacheSec === sec) drawFrame(c, W, H, gradeFrame(st.cache, st.frameW, st.frameH, clip), st.frameW, st.frameH, clip);
     return true;
@@ -165,6 +175,71 @@ export class Preview {
     if (this._busy) { this._dirty = true; return; }
     if (this._target) this._pump(); else { this.clear(); this._overlay(); }
   }
+  // PiP overlays (v0.45): each overlay clip keeps its own reader and last frame.
+  async _paintOverlays(tlUs) {
+    this.ovBoxes = [];
+    if (!this.project) return;
+    const total = normalize(this.project);
+    const active = overlaysAt(this.project, tlUs, total);
+    const keep = new Set(active.map((c) => c.id));
+    for (const [id, st] of this.ovReaders) if (!keep.has(id)) { this._close(st); this.ovReaders.delete(id); }
+    const W = this.canvas.width, H = this.canvas.height;
+    for (const clip of active) {
+      const media = this.project.media.find((m) => m.id === clip.mediaId); if (!media) continue;
+      let st = this.ovReaders.get(clip.id);
+      if (!st || st.mediaId !== media.id) {
+        if (st) this._close(st);
+        try { st = await this._openOverlay(media); } catch (e) { continue; }
+        this.ovReaders.set(clip.id, st);
+      }
+      const ovs = ovStateAt(clip, tlUs);
+      let img = null, fw = 0, fh = 0;
+      if (st.kind === 'image') { img = st.bitmap; fw = img.width; fh = img.height; }
+      else if (st.kind === 'video' && st.sink) {
+        const sec = Math.max(0, ovs.src / 1e6);
+        if (!(st.cache && st.cacheSec === sec)) {
+          let wrapped = null;
+          try { wrapped = await st.sink.getCanvas(sec); } catch (_) { wrapped = null; }
+          if (wrapped) {
+            if (!st.cache) { st.cache = document.createElement('canvas'); st.cache.width = st.frameW; st.cache.height = st.frameH; }
+            const cc = st.cache.getContext('2d'); cc.clearRect(0, 0, st.frameW, st.frameH); cc.drawImage(wrapped.canvas, 0, 0, st.frameW, st.frameH);
+            st.cacheSec = sec;
+          }
+        }
+        if (st.cache) { img = st.cache; fw = st.frameW; fh = st.frameH; }
+      }
+      if (!img) continue;
+      st.raw = img; st.rawW = fw; st.rawH = fh;   // unkeyed frame, for the colour picker
+      let cut = false;
+      if (cutOn(clip)) {   // cut out person (v0.48); the cut frame is cached so repaints while dragging don't re-run the model
+        const key = (st.kind === 'image' ? 'img' : st.cacheSec) + ':' + JSON.stringify(clip.cut);
+        if (st.cutKey !== key) {
+          try {
+            const out = await cutFrame(img, fw, fh, clip);
+            if (!st.cutCanvas) st.cutCanvas = document.createElement('canvas');
+            st.cutCanvas.width = fw; st.cutCanvas.height = fh;
+            const cx = st.cutCanvas.getContext('2d'); cx.clearRect(0, 0, fw, fh); cx.drawImage(out, 0, 0);
+            st.cutKey = key; this.cutError = null;
+          } catch (e) { this.cutError = e; st.cutKey = null; }
+        }
+        if (st.cutKey === key) { img = st.cutCanvas; cut = true; }
+      }
+      else if (keyOn(clip)) img = keyFrame(img, fw, fh, clip);   // green screen (v0.46)
+      const r = drawOverlay(this.ctx, W, H, img, fw, fh, ovs, cut || keyOn(clip));
+      this.ovBoxes.push({ id: clip.id, x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h });
+    }
+  }
+  async _openOverlay(media) {
+    const file = await readMedia(this.project.id, media.opfs);
+    if (media.kind === 'image') return { kind: 'image', mediaId: media.id, bitmap: await createImageBitmap(file) };
+    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+    const vtrack = await input.getPrimaryVideoTrack();
+    const box = fitBox(media.w, media.h, this.draft.w, this.draft.h);
+    const sink = vtrack ? new CanvasSink(vtrack, { width: box.w, height: box.h, fit: 'contain', poolSize: 2 }) : null;
+    return { kind: 'video', mediaId: media.id, input, sink, frameW: box.w, frameH: box.h };
+  }
+  // Unkeyed picture of an overlay as last drawn: { img, w, h } or null (colour picker).
+  overlayRaw(clipId) { const st = this.ovReaders.get(clipId); return st && st.raw ? { img: st.raw, w: st.rawW, h: st.rawH } : null; }
   _overlay() {
     if (!this.project) { this.hitBoxes = []; return; }
     this.hitBoxes = drawTextsAt(this.ctx, this.canvas.width, this.canvas.height, this.project, this.tlUs, { staticId: this.staticTextId });
@@ -205,6 +280,7 @@ export class Preview {
           const ok = await this._paint(this.ctx, this.cur, t.sourceSec, t.clip);
           if (!ok) { this._paintError('decode'); continue; }
         }
+        await this._paintOverlays(this.tlUs);
         this._overlay();
       } while (this._dirty);
     } finally {
@@ -222,6 +298,8 @@ export class Preview {
 
   dispose() {
     this._close(this.cur); this.cur = null;
+    for (const st of this.ovReaders.values()) this._close(st);
+    this.ovReaders.clear();
     this._dropAux();
     this._target = null;
     this._busy = false;
